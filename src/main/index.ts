@@ -4,6 +4,41 @@ import { registerIpc } from './ipc/register'
 import { shutdownAllConnections } from './ssh/connection-manager'
 
 const isDev = !!process.env['ELECTRON_RENDERER_URL']
+const appOrigin = isDev ? new URL(process.env['ELECTRON_RENDERER_URL'] as string).origin : null
+
+/** The app's own document: the dev server in dev, the packaged bundle in prod. */
+function isAppUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return appOrigin !== null ? u.origin === appOrigin : u.protocol === 'file:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * shell.openExternal hands the URL to the OS dispatcher, which launches apps for
+ * schemes like file:/smb:/custom handlers — only browser schemes may cross it.
+ */
+function openExternalIfWeb(url: string): void {
+  let protocol: string
+  try {
+    protocol = new URL(url).protocol
+  } catch {
+    return
+  }
+  if (protocol === 'http:' || protocol === 'https:') void shell.openExternal(url)
+}
+
+/**
+ * Cancels any navigation away from the app's own origin: a foreign document in
+ * this webContents re-runs the preload and inherits the whole window.api bridge.
+ */
+function denyIfForeign(details: { url: string; preventDefault: () => void }): boolean {
+  if (isAppUrl(details.url)) return false
+  details.preventDefault()
+  return true
+}
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -25,8 +60,20 @@ function createWindow(): void {
   win.on('ready-to-show', () => win.show())
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openExternalIfWeb(url)
     return { action: 'deny' }
+  })
+
+  // will-frame-navigate covers the main frame and every subframe, and will-navigate
+  // repeats it for the main frame — only one of the two may reach the browser
+  win.webContents.on('will-frame-navigate', (details) => {
+    if (denyIfForeign(details)) openExternalIfWeb(details.url)
+  })
+  win.webContents.on('will-navigate', (details) => {
+    denyIfForeign(details)
+  })
+  win.webContents.on('will-redirect', (details) => {
+    if (denyIfForeign(details)) openExternalIfWeb(details.url)
   })
 
   if (isDev) {

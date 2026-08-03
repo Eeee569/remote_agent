@@ -4,7 +4,7 @@
  * when the session exists and creates it otherwise.
  */
 import { HELPER_TMUX_CONF, TMUX_PREFIX } from '../../shared/helper-protocol'
-import { shQuote } from './helper-client'
+import { shQuote } from '../util/sh'
 
 const MAX_NAME_LEN = 40
 

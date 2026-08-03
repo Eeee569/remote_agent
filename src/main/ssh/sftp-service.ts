@@ -9,8 +9,12 @@ import { getConnectionManager } from './connection-manager'
 import { CodedError } from '../util/errors'
 
 const OP_TIMEOUT_MS = 30_000
+/** Slowest link a byte-moving op is still expected to finish on. */
+const MIN_TRANSFER_BYTES_PER_SEC = 32 * 1024
+const MAX_OP_TIMEOUT_MS = 10 * 60_000
 const READ_CAP_BYTES = 2 * 1024 * 1024 // 2 MiB
 const IO_CHUNK = 32_768
+const TMP_MODE = 0o600
 
 const S_IFMT = 0o170000
 const S_IFDIR = 0o040000
@@ -34,11 +38,25 @@ function toSftpError(err: unknown, label: string): CodedError {
   return new CodedError('sftp-failed', `sftp ${label} failed: ${msg}`)
 }
 
+/**
+ * Budget for an op that moves `bytes` over the wire, on top of the base timeout.
+ * Clamped: the read cap comes from the renderer, and a delay past 2^31 ms would
+ * overflow setTimeout and fire immediately.
+ */
+function transferTimeoutMs(bytes: number): number {
+  const budget = OP_TIMEOUT_MS + Math.ceil((bytes / MIN_TRANSFER_BYTES_PER_SEC) * 1000)
+  return Math.min(budget, MAX_OP_TIMEOUT_MS)
+}
+
 // ---------------- promisified sftp primitives ----------------
 
-function sfOpen(sftp: SFTPWrapper, path: string, mode: 'r' | 'w'): Promise<Buffer> {
+function sfOpen(sftp: SFTPWrapper, path: string, flags: 'r' | 'w', mode?: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    sftp.open(path, mode, (err, handle) => (err ? reject(err) : resolve(handle)))
+    if (mode === undefined) {
+      sftp.open(path, flags, (err, handle) => (err ? reject(err) : resolve(handle)))
+    } else {
+      sftp.open(path, flags, { mode }, (err, handle) => (err ? reject(err) : resolve(handle)))
+    }
   })
 }
 
@@ -159,6 +177,8 @@ export class SftpService {
       if (e.hostId === this.hostId && e.status !== 'connected') {
         // the channel is dead (or about to be); force a re-open on next use
         this.sftp = null
+        // the host record may point at another account by the next connect
+        this.home = null
       }
     })
   }
@@ -168,58 +188,77 @@ export class SftpService {
     maxBytes?: number
   ): Promise<{ data: Buffer; truncated: boolean; size: number; mtimeMs: number }> {
     const cap = maxBytes ?? READ_CAP_BYTES
-    return this.run('readFile', async (sftp) => {
-      const abs = await this.expand(sftp, path)
-      let handle: Buffer
-      try {
-        handle = await sfOpen(sftp, abs, 'r')
-      } catch (err) {
-        if (isNoSuchFile(err)) throw new CodedError('not-found', `no such file: ${abs}`)
-        throw err
-      }
-      try {
-        const st = await sfFstat(sftp, handle)
-        const toRead = Math.min(st.size, cap)
-        const data = Buffer.alloc(toRead)
-        let offset = 0
-        while (offset < toRead) {
-          const n = await sfRead(sftp, handle, data, offset, toRead - offset, offset)
-          if (n <= 0) break
-          offset += n
+    return this.run(
+      'readFile',
+      async (sftp) => {
+        const abs = await this.expand(sftp, path)
+        let handle: Buffer
+        try {
+          handle = await sfOpen(sftp, abs, 'r')
+        } catch (err) {
+          if (isNoSuchFile(err)) throw new CodedError('not-found', `no such file: ${abs}`)
+          throw err
         }
-        return {
-          data: offset === toRead ? data : data.subarray(0, offset),
-          truncated: toRead < st.size,
-          size: st.size,
-          mtimeMs: st.mtime * 1000
+        try {
+          const st = await sfFstat(sftp, handle)
+          const toRead = Math.min(st.size, cap)
+          const data = Buffer.alloc(toRead)
+          let offset = 0
+          while (offset < toRead) {
+            const n = await sfRead(sftp, handle, data, offset, toRead - offset, offset)
+            if (n <= 0) break
+            offset += n
+          }
+          return {
+            data: offset === toRead ? data : data.subarray(0, offset),
+            truncated: toRead < st.size,
+            size: st.size,
+            mtimeMs: st.mtime * 1000
+          }
+        } finally {
+          await sfClose(sftp, handle).catch(() => undefined)
         }
-      } finally {
-        await sfClose(sftp, handle).catch(() => undefined)
-      }
-    })
+      },
+      transferTimeoutMs(cap)
+    )
   }
 
   async writeFileAtomic(path: string, data: Buffer, mode?: number): Promise<void> {
-    return this.run('writeFileAtomic', async (sftp) => {
-      const abs = await this.expand(sftp, path)
-      const tmp = abs + '.ra-tmp-' + randomBytes(4).toString('hex')
-      let handle: Buffer | null = null
-      try {
-        handle = await sfOpen(sftp, tmp, 'w')
-        for (let off = 0; off < data.length; off += IO_CHUNK) {
-          const len = Math.min(IO_CHUNK, data.length - off)
-          await sfWrite(sftp, handle, data, off, len, off)
+    return this.run(
+      'writeFileAtomic',
+      async (sftp) => {
+        const abs = await this.expand(sftp, path)
+        // the rename replaces the inode, so an existing file's mode must be
+        // carried over explicitly or a 0600 secret would end up world-readable
+        let finalMode = mode
+        if (finalMode === undefined) {
+          try {
+            finalMode = (await sfStat(sftp, abs)).mode & 0o7777
+          } catch (err) {
+            if (!isNoSuchFile(err)) throw err
+            finalMode = TMP_MODE
+          }
         }
-        await sfClose(sftp, handle)
-        handle = null
-        if (mode !== undefined) await sfChmod(sftp, tmp, mode)
-        await this.renameOver(sftp, tmp, abs)
-      } catch (err) {
-        if (handle) await sfClose(sftp, handle).catch(() => undefined)
-        await sfUnlink(sftp, tmp).catch(() => undefined)
-        throw err
-      }
-    })
+        const tmp = abs + '.ra-tmp-' + randomBytes(4).toString('hex')
+        let handle: Buffer | null = null
+        try {
+          handle = await sfOpen(sftp, tmp, 'w', TMP_MODE)
+          for (let off = 0; off < data.length; off += IO_CHUNK) {
+            const len = Math.min(IO_CHUNK, data.length - off)
+            await sfWrite(sftp, handle, data, off, len, off)
+          }
+          await sfClose(sftp, handle)
+          handle = null
+          await sfChmod(sftp, tmp, finalMode)
+          await this.renameOver(sftp, tmp, abs)
+        } catch (err) {
+          if (handle) await sfClose(sftp, handle).catch(() => undefined)
+          await sfUnlink(sftp, tmp).catch(() => undefined)
+          throw err
+        }
+      },
+      transferTimeoutMs(data.length)
+    )
   }
 
   async stat(path: string): Promise<{ isDir: boolean; size: number; mtimeMs: number } | null> {
@@ -286,21 +325,23 @@ export class SftpService {
     })
   }
 
-  async realpath(path: string): Promise<string> {
-    return this.run('realpath', async (sftp) => {
-      const abs = await this.expand(sftp, path)
-      return sfRealpath(sftp, abs)
-    })
+  /** Absolute remote home directory; the single cache "~" expansion resolves from. */
+  async homeDir(): Promise<string> {
+    return this.run('homeDir', (sftp) => this.expand(sftp, '~'))
   }
 
   // ---------------- internals ----------------
 
-  /** Serialize every operation; wrap failures in CodedError with a 30s timeout. */
-  private run<T>(label: string, fn: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
+  /** Serialize every operation; wrap failures in CodedError with a per-op timeout. */
+  private run<T>(
+    label: string,
+    fn: (sftp: SFTPWrapper) => Promise<T>,
+    timeoutMs = OP_TIMEOUT_MS
+  ): Promise<T> {
     const task = this.queue.then(async () => {
       const sftp = await this.acquire()
       try {
-        return await this.withTimeout(fn(sftp), label)
+        return await this.withTimeout(fn(sftp), label, sftp, timeoutMs)
       } catch (err) {
         throw toSftpError(err, label)
       }
@@ -312,13 +353,24 @@ export class SftpService {
     return task
   }
 
-  private withTimeout<T>(p: Promise<T>, label: string): Promise<T> {
+  private withTimeout<T>(
+    p: Promise<T>,
+    label: string,
+    sftp: SFTPWrapper,
+    timeoutMs: number
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        // a stuck op usually means a dead channel; force a re-open next time
-        this.sftp = null
-        reject(new CodedError('timeout', `sftp ${label} timed out after ${OP_TIMEOUT_MS}ms`))
-      }, OP_TIMEOUT_MS)
+        // tearing the channel down frees the server's session slot and fails the
+        // abandoned op, so it cannot race the next one off the queue
+        if (this.sftp === sftp) this.sftp = null
+        try {
+          sftp.end()
+        } catch {
+          // ignore
+        }
+        reject(new CodedError('timeout', `sftp ${label} timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
       p.then(
         (v) => {
           clearTimeout(timer)
@@ -373,8 +425,23 @@ export class SftpService {
     } catch {
       // extension unsupported or failed; fall back below
     }
-    await sfUnlink(sftp, dest).catch(() => undefined)
-    await sfRename(sftp, src, dest)
+    // plain SSH_FXP_RENAME cannot overwrite, so move the target aside rather
+    // than unlink it: a failed rename must never leave the caller with neither
+    const backup = dest + '.ra-bak-' + randomBytes(4).toString('hex')
+    let movedAside = false
+    try {
+      await sfRename(sftp, dest, backup)
+      movedAside = true
+    } catch {
+      // dest does not exist (or cannot be moved); the rename below decides
+    }
+    try {
+      await sfRename(sftp, src, dest)
+    } catch (err) {
+      if (movedAside) await sfRename(sftp, backup, dest).catch(() => undefined)
+      throw err
+    }
+    if (movedAside) await sfUnlink(sftp, backup).catch(() => undefined)
   }
 }
 

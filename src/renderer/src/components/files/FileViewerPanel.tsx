@@ -23,9 +23,15 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
   useEffect(() => {
     const prev = prevOpenRef.current
     prevOpenRef.current = open
+    const openBySession = useFilesStore.getState().openBySession
     for (const p of prev) {
       if (!open.includes(p)) {
-        void disposeFileModel(hostId, p)
+        // models are shared per host+path, so another session's viewer may
+        // still be showing this file
+        const usedElsewhere = Object.entries(openBySession).some(
+          ([sid, paths]) => sid !== sessionId && paths.includes(p)
+        )
+        if (!usedElsewhere) void disposeFileModel(hostId, p)
         setDirtyByPath((d) => {
           if (!(p in d)) return d
           const next = { ...d }
@@ -34,7 +40,7 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
         })
       }
     }
-  }, [open, hostId])
+  }, [open, hostId, sessionId])
 
   const onDirtyChange = (path: string, dirty: boolean): void => {
     setDirtyByPath((d) => (d[path] === dirty ? d : { ...d, [path]: dirty }))

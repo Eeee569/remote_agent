@@ -16,6 +16,8 @@ export interface MonacoFileViewProps {
 
 /** uri string -> last text loaded from / saved to the server */
 const savedTextByUri = new Map<string, string>()
+/** uris whose loaded text is only the read-capped prefix of the remote file */
+const truncatedUris = new Set<string>()
 let monacoLoaded = false
 let tsDiagnosticsRelaxed = false
 
@@ -30,6 +32,7 @@ export function fileUri(hostId: string, path: string): string {
 export async function disposeFileModel(hostId: string, path: string): Promise<void> {
   const uri = fileUri(hostId, path)
   savedTextByUri.delete(uri)
+  truncatedUris.delete(uri)
   if (!monacoLoaded) return
   try {
     const monacoMod = await import('@/monaco-setup')
@@ -153,6 +156,12 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
     onDirtyChangeRef.current?.(path, value)
   }
 
+  const setEditingEnabled = (value: boolean): void => {
+    editingRef.current = value
+    setEditing(value)
+    editorRef.current?.updateOptions({ readOnly: !value })
+  }
+
   const ensureMonaco = async (): Promise<typeof Monaco> => {
     if (monacoRef.current) return monacoRef.current
     const monacoMod = await import('@/monaco-setup')
@@ -177,6 +186,11 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
   const save = async (): Promise<void> => {
     const model = editorRef.current?.getModel()
     if (!model || !dirtyRef.current) return
+    if (truncatedUris.has(uri)) {
+      // writing back the read-capped prefix would destroy the rest of the file
+      addToast('error', `${basename(path)} is truncated; saving is disabled`)
+      return
+    }
     try {
       const value = model.getValue()
       await api.fsWrite(hostId, path, new TextEncoder().encode(value))
@@ -235,6 +249,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
       const saved = savedTextByUri.get(uri)
       if (opts.keepDirty && existing && saved !== undefined && existing.getValue() !== saved) {
         // an earlier mount left unsaved edits — keep them instead of reloading
+        if (truncatedUris.has(uri)) setEditingEnabled(false)
         attachEditor(monaco, existing)
         setText(existing.getValue())
         markDirty(true)
@@ -257,6 +272,12 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
         model.setValue(content)
       }
       savedTextByUri.set(uri, content)
+      if (loadedInfo.truncated) {
+        truncatedUris.add(uri)
+        setEditingEnabled(false)
+      } else {
+        truncatedUris.delete(uri)
+      }
       attachEditor(monaco, model)
       setText(content)
       setInfo(loadedInfo)
@@ -285,9 +306,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
 
   const toggleEditing = (): void => {
     const next = !editingRef.current
-    editingRef.current = next
-    setEditing(next)
-    editorRef.current?.updateOptions({ readOnly: !next })
+    setEditingEnabled(next)
     if (next && isMarkdown) setMdView('source')
   }
 
@@ -298,6 +317,8 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
     void load({ keepDirty: false })
   }
 
+  // a reattached model carries no info, so the flag save() checks is the source of truth
+  const truncated = info?.truncated === true || truncatedUris.has(uri)
   const showEditor = phase === 'text' && (!isMarkdown || mdView === 'source')
   const smallBtn: React.CSSProperties = { padding: '1px 7px', fontSize: 11 }
 
@@ -328,7 +349,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
         >
           {middleEllipsis(path, 72)}
         </span>
-        {info?.truncated && (
+        {truncated && (
           <span
             title='The file is larger than the read limit; showing the beginning only. Editing is disabled.'
             style={{
@@ -384,7 +405,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
         <button className='ra-btn' style={smallBtn} title='Reload from server' onClick={reload}>
           ↻
         </button>
-        {phase === 'text' && !info?.truncated && (
+        {phase === 'text' && !truncated && (
           <button
             className='ra-btn'
             style={{

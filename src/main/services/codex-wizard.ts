@@ -52,7 +52,10 @@ async function computeChanges(opts: CodexWizardOptions): Promise<FileDiff[]> {
     const { content: before } = await readTextFile(hostId, path)
     const obj = parseJsonObject(before, path)
     const servers = isRecord(obj.mcpServers) ? { ...obj.mcpServers } : {}
+    const prev = isRecord(servers['codex']) ? servers['codex'] : {}
     servers['codex'] = {
+      // only the three keys the wizard owns are forced; env/timeout/custom keys stay
+      ...prev,
       type: 'stdio',
       command: opts.command || 'codex',
       args: opts.args ?? ['mcp-server']

@@ -150,7 +150,10 @@ export function registerIpc(): void {
 
   handle(CH.hostsSave, hostSaveInputSchema, (p) => toPublic(saveHost(p)))
 
-  handle(CH.hostsDelete, hostIdSchema, ({ hostId }) => {
+  handle(CH.hostsDelete, hostIdSchema, async ({ hostId }) => {
+    // revoke access before the record is gone: disconnect cancels retries and ends
+    // the client, and its status event tears down terminals and the sftp channel
+    await cm.disconnect(hostId)
     deleteHost(hostId)
   })
 

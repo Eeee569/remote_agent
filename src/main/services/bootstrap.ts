@@ -26,15 +26,9 @@ const PROBE_TIMEOUT_MS = 45_000
 
 // ---------------- home dir ----------------
 
-const homeCache = new Map<string, string>()
-
-/** Absolute remote home directory (sftp realpath "."), cached per host. */
+/** Absolute remote home directory, cached by the sftp service per connection. */
 export async function remoteHome(hostId: string): Promise<string> {
-  const cached = homeCache.get(hostId)
-  if (cached !== undefined) return cached
-  const home = await getSftpService(hostId).realpath('.')
-  homeCache.set(hostId, home)
-  return home
+  return getSftpService(hostId).homeDir()
 }
 
 // ---------------- status probing ----------------

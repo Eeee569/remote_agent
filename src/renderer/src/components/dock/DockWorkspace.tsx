@@ -17,6 +17,12 @@ interface DockWorkspaceProps {
   project: ProjectMeta
 }
 
+/** Layout snapshot taken while the workspace is still mounted and intact. */
+interface PendingLayout {
+  dockview: unknown
+  openFilesBySession: Record<string, string[]>
+}
+
 /**
  * The dockview workspace for one project (or the special "__settings__"
  * pseudo-project). Restores the layout persisted on the server, keeps panels
@@ -27,7 +33,7 @@ export default function DockWorkspace({ hostId, project }: DockWorkspaceProps): 
   const readyRef = useRef(false)
   const [ready, setReady] = useState(false)
   const readyDisposeRef = useRef<(() => void) | null>(null)
-  const pendingLayoutRef = useRef<unknown | null>(null)
+  const pendingLayoutRef = useRef<PendingLayout | null>(null)
   const persistTimerRef = useRef<number | null>(null)
   const sessions = useProjectsStore((s) => s.sessionsByProject[project.id])
 
@@ -108,13 +114,37 @@ export default function DockWorkspace({ hostId, project }: DockWorkspaceProps): 
     [hostId, project.id, project.repoPath]
   )
 
+  const rebindPanels = useCallback(
+    (dv: DockviewApi): void => {
+      // the layout lives on the server and is shared across clients, so restored
+      // params can carry a host record id that is local to another machine
+      for (const panel of dv.panels) {
+        const params = panel.params as Partial<SessionPanelParams> | undefined
+        if (typeof params?.hostId !== 'string') continue
+        try {
+          panel.api.updateParameters({ hostId, projectId: project.id })
+        } catch {
+          // panel disposed mid-restore
+        }
+      }
+    },
+    [hostId, project.id]
+  )
+
   // ---------------- persistence ----------------
 
   const capturePending = useCallback((): void => {
     const dv = apiRef.current
     if (!dv || !readyRef.current || project.id === SETTINGS_ID) return
+    const list = useProjectsStore.getState().sessionsByProject[project.id]
+    if (!list) return
+    const sessionIds = new Set(list.map((s) => s.id))
+    const openFilesBySession: Record<string, string[]> = {}
+    for (const [sid, paths] of Object.entries(useFilesStore.getState().openBySession)) {
+      if (sessionIds.has(sid)) openFilesBySession[sid] = paths
+    }
     try {
-      pendingLayoutRef.current = dv.toJSON()
+      pendingLayoutRef.current = { dockview: dv.toJSON(), openFilesBySession }
     } catch {
       // dockview mid-teardown; keep the previous snapshot
     }
@@ -126,17 +156,17 @@ export default function DockWorkspace({ hostId, project }: DockWorkspaceProps): 
       persistTimerRef.current = null
     }
     if (project.id === SETTINGS_ID) return
-    const dockviewJson = pendingLayoutRef.current
-    if (dockviewJson === null) return
+    const pending = pendingLayoutRef.current
+    if (pending === null) return
+    // a missing session list means the projects store was reset (host switch),
+    // not a project without sessions — writing now would erase good state
+    if (!useProjectsStore.getState().sessionsByProject[project.id]) return
     pendingLayoutRef.current = null
-    const sessionIds = new Set(
-      (useProjectsStore.getState().sessionsByProject[project.id] ?? []).map((s) => s.id)
-    )
-    const openFilesBySession: Record<string, string[]> = {}
-    for (const [sid, paths] of Object.entries(useFilesStore.getState().openBySession)) {
-      if (sessionIds.has(sid)) openFilesBySession[sid] = paths
+    const layout: ProjectLayout = {
+      dockview: pending.dockview,
+      openFilesBySession: pending.openFilesBySession,
+      schemaVersion: 1
     }
-    const layout: ProjectLayout = { dockview: dockviewJson, openFilesBySession, schemaVersion: 1 }
     void api.layoutWrite(hostId, project.id, layout).catch(() => {
       // persistence is best-effort; the next layout change retries
     })
@@ -190,6 +220,7 @@ export default function DockWorkspace({ hostId, project }: DockWorkspaceProps): 
             }
           }
         }
+        if (restored) rebindPanels(event.api)
         useFilesStore.getState().hydrate(layout?.openFilesBySession ?? {})
         if (!restored) {
           const list = useProjectsStore.getState().sessionsByProject[project.id] ?? []
@@ -205,7 +236,7 @@ export default function DockWorkspace({ hostId, project }: DockWorkspaceProps): 
       }
       void init()
     },
-    [hostId, project.id, addSessionPanels, addSettingsPanels, schedulePersist]
+    [hostId, project.id, addSessionPanels, addSettingsPanels, rebindPanels, schedulePersist]
   )
 
   // flush pending writes + drop subscriptions on unmount

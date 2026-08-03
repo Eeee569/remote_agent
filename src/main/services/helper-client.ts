@@ -29,6 +29,7 @@ import {
 import { getConnectionManager } from '../ssh/connection-manager'
 import { execCommand } from '../ssh/exec'
 import { CodedError } from '../util/errors'
+import { shQuote } from '../util/sh'
 
 export const HELPER_SOURCE: string = helperSource
 export const TMUX_CONF_SOURCE: string = tmuxConfSource
@@ -41,11 +42,7 @@ export function helperSha256(): string {
   return cachedSha
 }
 
-/** POSIX single-quote shell quoting; safe to embed in an exec command line. */
-export function shQuote(s: string): string {
-  if (s.length > 0 && /^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s
-  return "'" + s.replace(/'/g, "'\\''") + "'"
-}
+export { shQuote }
 
 const sessionCreateResultSchema = z.object({ tmuxName: z.string() })
 

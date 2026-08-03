@@ -138,6 +138,8 @@ export class ConnectionManager {
     this.cancelRetry(e)
     const client = e.client
     e.client = null
+    // abandon the superseded attempt so a later connect() starts a fresh one
+    e.inflight = null
     if (e.status !== 'idle') this.setStatus(hostId, e, 'idle')
     if (client) {
       try {
@@ -155,6 +157,7 @@ export class ConnectionManager {
       this.cancelRetry(e)
       const client = e.client
       e.client = null
+      e.inflight = null
       e.status = 'idle'
       if (client) {
         try {
@@ -263,7 +266,18 @@ export class ConnectionManager {
         e.client = null
         this.afterDrop(hostId, e)
       })
-      client.connect(config)
+      try {
+        // ssh2 validates the private key synchronously and throws for an
+        // unparsable key or a wrong passphrase: no socket, so no close event
+        client.connect(config)
+      } catch (err) {
+        e.lastError = toCoded(err)
+        if (e.client === client) {
+          e.client = null
+          this.afterDrop(hostId, e)
+        }
+        reject(e.lastError)
+      }
     })
     const tracked = p.finally(() => {
       if (e.inflight === tracked) e.inflight = null
@@ -436,6 +450,10 @@ export function testHost(input: HostSaveInput, storedFingerprint?: string): Prom
     client.on('close', () => {
       finish({ ok: false, error: 'connection closed before authentication completed' })
     })
-    client.connect(config)
+    try {
+      client.connect(config)
+    } catch (err) {
+      finish({ ok: false, error: toCoded(err).message })
+    }
   })
 }
