@@ -174,8 +174,9 @@ export function registerIpc(): void {
   handle(CH.connConnect, hostIdSchema, async ({ hostId }) => {
     cm.setWanted(hostId, true)
     await cm.connect(hostId)
-    // helper check/install must never fail the connect
-    void bootstrapSvc.ensureHelper(hostId, broadcastProgress)
+    // await so the first project:list after connect can't race the install on a
+    // fresh server; ensureHelper never throws, so it can't fail the connect
+    await bootstrapSvc.ensureHelper(hostId, broadcastProgress)
     return cm.status(hostId)
   })
 
