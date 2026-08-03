@@ -28,6 +28,30 @@ npm run test:helper  # python unittest suite for the server helper
 npm run build        # production bundles into out/
 ```
 
+## Verification scripts
+
+`scripts/` drives the built app with Playwright (`npm run build` first). The end-to-end
+scripts need an SSH server you don't mind being restarted — point them at a throwaway
+`sshd` on localhost, never a real host.
+
+```sh
+node scripts/smoke.mjs                  # launch, screenshot, check the IPC bridge
+
+E2E_KEY=/path/to/client_key \
+E2E_REPO=/path/to/a/test/git/repo \
+E2E_SSH_PORT=2299 \
+  node scripts/e2e-local.mjs            # connect -> worktree session -> tmux -> file viewer
+
+E2E_SSHD_DIR=/path/to/sshd/rundir \     # dir holding sshd.pid, for the forced-drop step
+  node scripts/e2e-resilience.mjs       # app quit + SSH kill; asserts no work is lost
+
+node scripts/e2e-codex-wizard.mjs       # writes Codex MCP config, checks `claude mcp list`
+```
+
+Screenshots go to `SCREENSHOT_DIR` (default `/tmp/ra-*-shots`). The resilience script kills
+the descendant processes of the sshd named by `E2E_SSHD_DIR/sshd.pid` — it never touches the
+system sshd, but do not point it at one you rely on.
+
 ## Packaging (macOS)
 
 ```sh

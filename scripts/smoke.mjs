@@ -2,8 +2,8 @@
 import { _electron as electron } from 'playwright-core'
 import * as fs from 'node:fs'
 
-const APP_DIR = '/home/will/Documents/remote_agent'
-const SHOTS = '/tmp/claude-1000/-home-will-Documents-remote-agent/20992b23-0222-4831-be74-f75915524a32/scratchpad/shots'
+const APP_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+const SHOTS = process.env.SCREENSHOT_DIR || '/tmp/ra-smoke-shots'
 fs.mkdirSync(SHOTS, { recursive: true })
 
 const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
