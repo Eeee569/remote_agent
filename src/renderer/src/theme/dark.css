@@ -1,0 +1,175 @@
+/* Remote Agent — dark modern theme tokens.
+   Single source of truth: dockview, xterm, and Monaco themes derive from these. */
+
+:root {
+  --ra-bg: #0d1117;
+  --ra-bg-raised: #131a23;
+  --ra-bg-panel: #161d27;
+  --ra-bg-hover: #1c2532;
+  --ra-bg-active: #22304a;
+  --ra-border: #253041;
+  --ra-border-strong: #33415a;
+  --ra-text: #dbe4f0;
+  --ra-text-dim: #8b98ab;
+  --ra-text-faint: #5b6878;
+  --ra-accent: #6ea8fe;
+  --ra-accent-strong: #3d8bfd;
+  --ra-accent-dim: rgba(110, 168, 254, 0.15);
+  --ra-green: #3fb97f;
+  --ra-yellow: #d9a63f;
+  --ra-red: #e5636e;
+  --ra-purple: #b98af0;
+  --ra-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
+  --ra-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --ra-radius: 6px;
+  --ra-titlebar-h: 38px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--ra-bg);
+  color: var(--ra-text);
+  font-family: var(--ra-font);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ra-border-strong);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ra-text-faint);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+button.ra-btn {
+  background: var(--ra-bg-hover);
+  color: var(--ra-text);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-family: var(--ra-font);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+button.ra-btn:hover {
+  background: var(--ra-bg-active);
+}
+button.ra-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.ra-btn.primary {
+  background: var(--ra-accent-strong);
+  border-color: var(--ra-accent-strong);
+  color: #fff;
+}
+button.ra-btn.primary:hover {
+  filter: brightness(1.1);
+}
+button.ra-btn.danger {
+  color: var(--ra-red);
+  border-color: var(--ra-red);
+}
+
+input.ra-input,
+select.ra-input,
+textarea.ra-input {
+  background: var(--ra-bg);
+  color: var(--ra-text);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: var(--ra-radius);
+  padding: 5px 9px;
+  font-size: 13px;
+  font-family: var(--ra-font);
+  outline: none;
+}
+input.ra-input:focus,
+select.ra-input:focus,
+textarea.ra-input:focus {
+  border-color: var(--ra-accent);
+  box-shadow: 0 0 0 2px var(--ra-accent-dim);
+}
+
+label.ra-label {
+  display: block;
+  font-size: 11.5px;
+  color: var(--ra-text-dim);
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ra-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.ra-dialog {
+  background: var(--ra-bg-raised);
+  border: 1px solid var(--ra-border-strong);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  min-width: 440px;
+  max-width: 720px;
+  max-height: 85vh;
+  overflow: auto;
+  padding: 20px;
+}
+
+.ra-dialog h2 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* dockview theme overrides (extends dockview-theme-dark) */
+.dockview-theme-ra {
+  --dv-background-color: var(--ra-bg);
+  --dv-paneview-header-border-color: var(--ra-border);
+  --dv-tabs-and-actions-container-background-color: var(--ra-bg-raised);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--ra-bg-panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--ra-bg-raised);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--ra-bg-raised);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--ra-bg-raised);
+  --dv-activegroup-visiblepanel-tab-color: var(--ra-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--ra-text-dim);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--ra-text-dim);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--ra-text-faint);
+  --dv-group-view-background-color: var(--ra-bg-panel);
+  --dv-separator-border: var(--ra-border);
+  --dv-drag-over-background-color: var(--ra-accent-dim);
+  --dv-drag-over-border-color: var(--ra-accent);
+  --dv-tab-divider-color: var(--ra-border);
+  --dv-floating-box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+}
