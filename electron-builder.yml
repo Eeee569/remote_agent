@@ -1,0 +1,30 @@
+appId: ai.bidlo.remote-agent
+productName: Remote Agent
+copyright: Copyright © 2026 Will Wolfe
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - '!**/*.map'
+asar: true
+npmRebuild: true
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization is driven by env in CI (APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID).
+  notarize: false
+dmg:
+  sign: false
+linux:
+  target: [AppImage]
+  category: Development

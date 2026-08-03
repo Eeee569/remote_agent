@@ -1,0 +1,55 @@
+name: Build macOS app
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Helper tests
+        run: npm run test:helper
+
+      - name: Build renderer/main bundles
+        run: npm run build
+
+      # Unsigned build unless signing secrets are configured.
+      # For signed + notarized releases set repo secrets:
+      #   CSC_LINK (base64 .p12), CSC_KEY_PASSWORD,
+      #   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+      - name: Package (electron-builder)
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_ID" ]; then
+            npx electron-builder --mac --publish never -c.mac.notarize=true
+          else
+            npx electron-builder --mac --publish never
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-agent-mac
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
