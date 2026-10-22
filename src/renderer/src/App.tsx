@@ -11,6 +11,7 @@ import ProjectTabBar from '@/components/projects/ProjectTabBar'
 import AddProjectDialog from '@/components/projects/AddProjectDialog'
 import NewSessionDialog from '@/components/projects/NewSessionDialog'
 import DockWorkspace from '@/components/dock/DockWorkspace'
+import GlobalGrid from '@/components/dock/GlobalGrid'
 import Toasts from '@/components/common/Toasts'
 
 const SETTINGS_ID = '__settings__'
@@ -69,6 +70,24 @@ export default function App(): React.JSX.Element {
   const openHostForm = useUiStore((s) => s.openHostForm)
   const openAddProject = useUiStore((s) => s.openAddProject)
   const openNewSession = useUiStore((s) => s.openNewSession)
+  const globalGridOpen = useUiStore((s) => s.globalGridOpen)
+  const toggleGlobalGrid = useUiStore((s) => s.toggleGlobalGrid)
+
+  // a file dropped where nothing takes it (title bar, settings, …) would make
+  // Chromium open it in place of the app; refuse it there instead
+  useEffect(() => {
+    const refuse = (e: DragEvent): void => {
+      if (e.defaultPrevented || !e.dataTransfer?.types.includes('Files')) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'none'
+    }
+    window.addEventListener('dragover', refuse)
+    window.addEventListener('drop', refuse)
+    return () => {
+      window.removeEventListener('dragover', refuse)
+      window.removeEventListener('drop', refuse)
+    }
+  }, [])
 
   useEffect(() => {
     initConnectionEvents()
@@ -132,6 +151,8 @@ export default function App(): React.JSX.Element {
         </button>
       </CenterCard>
     )
+  } else if (globalGridOpen) {
+    main = <GlobalGrid hostId={activeHost.id} />
   } else if (activeProjectId === SETTINGS_ID) {
     main = <DockWorkspace hostId={activeHost.id} project={SETTINGS_PROJECT} />
   } else if (!activeProject) {
@@ -139,8 +160,8 @@ export default function App(): React.JSX.Element {
       <CenterCard>
         <h2 style={{ margin: '0 0 8px', fontSize: 16 }}>Create or pick a project</h2>
         <p style={{ color: 'var(--ra-text-dim)', margin: '0 0 20px' }}>
-          A project is a git repository on the server. Sessions, worktrees, and layout live under
-          it.
+          A project is a directory on the server. Any directory will do — one that is not a git
+          repository is initialized as you add it. Sessions, worktrees, and layout live under it.
         </p>
         <button
           className='ra-btn primary'
@@ -179,6 +200,22 @@ export default function App(): React.JSX.Element {
           <HostPicker />
         </div>
         <div style={{ flex: 1 }} />
+        <button
+          className='ra-btn'
+          style={{
+            ...noDrag,
+            padding: '3px 12px',
+            fontSize: 12,
+            ...(globalGridOpen
+              ? { background: 'var(--ra-bg-active)', color: 'var(--ra-text)', borderColor: 'var(--ra-accent)' }
+              : {})
+          }}
+          disabled={!connected}
+          title='Show every running session across all projects in one resizable grid'
+          onClick={toggleGlobalGrid}
+        >
+          {globalGridOpen ? 'Exit Project Grid' : 'Project Grid'}
+        </button>
         <button
           className='ra-btn primary'
           style={{ ...noDrag, padding: '3px 12px', fontSize: 12 }}

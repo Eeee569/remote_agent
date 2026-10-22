@@ -223,6 +223,7 @@ class GitStatusTests(HelperTestCase):
         data = self.ok('git-status', '--path', repo)
         self.assertEqual(data, {
             'isRepo': True,
+            'hasCommit': True,
             'branch': 'main',
             'upstream': None,
             'ahead': 0,
@@ -288,6 +289,7 @@ class GitStatusTests(HelperTestCase):
         data = self.ok('git-status', '--path', plain)
         self.assertEqual(data, {
             'isRepo': False,
+            'hasCommit': False,
             'branch': None,
             'upstream': None,
             'ahead': 0,
@@ -296,6 +298,246 @@ class GitStatusTests(HelperTestCase):
             'modified': [],
             'untracked': []
         })
+
+
+@unittest.skipIf(GIT is None, 'git not installed')
+class GitInitTests(HelperTestCase):
+    def head_subject(self, repo):
+        proc = subprocess.run(
+            [GIT, '-C', repo, 'log', '-1', '--pretty=%s'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        return proc.stdout.strip()
+
+    def tracked(self, repo):
+        proc = subprocess.run(
+            [GIT, '-C', repo, 'ls-files'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, check=True
+        )
+        return sorted(proc.stdout.split())
+
+    def test_plain_dir_becomes_a_repo_with_its_files_committed(self):
+        plain = os.path.join(self.home, 'plain')
+        os.makedirs(os.path.join(plain, 'sub'))
+        for rel in ('a.txt', os.path.join('sub', 'b.txt')):
+            with open(os.path.join(plain, rel), 'w') as fh:
+                fh.write('x\n')
+
+        data = self.ok('git-init', '--path', plain)
+        self.assertEqual(data['path'], plain)
+        self.assertTrue(data['initialized'])
+        self.assertTrue(data['committed'])
+        self.assertIsInstance(data['branch'], str)
+        # the point of committing: a worktree can branch off it and get the files
+        self.assertEqual(self.tracked(plain), ['a.txt', 'sub/b.txt'])
+        self.assertEqual(self.ok('git-status', '--path', plain)['isRepo'], True)
+
+    def test_missing_directory_is_created(self):
+        target = os.path.join(self.home, 'brand', 'new')
+        data = self.ok('git-init', '--path', target)
+        self.assertTrue(os.path.isdir(target))
+        self.assertTrue(data['initialized'])
+        # empty dir still needs the root commit worktrees branch from
+        self.assertTrue(data['committed'])
+        self.assertEqual(self.tracked(target), [])
+
+    def test_worktree_add_works_on_a_freshly_initialised_dir(self):
+        plain = os.path.join(self.home, 'fresh')
+        os.makedirs(plain)
+        with open(os.path.join(plain, 'code.py'), 'w') as fh:
+            fh.write('print(1)\n')
+        self.ok('git-init', '--path', plain)
+
+        wt = os.path.join(self.home, 'wt')
+        self.ok('worktree-add', '--repo', plain, '--path', wt, '--branch', 'feat')
+        # the worktree must carry the code, not just exist
+        self.assertTrue(os.path.exists(os.path.join(wt, 'code.py')))
+
+    def test_existing_repo_is_left_alone(self):
+        repo = self.make_repo()
+        with open(os.path.join(repo, 'dirty.txt'), 'w') as fh:
+            fh.write('uncommitted\n')
+
+        data = self.ok('git-init', '--path', repo)
+        self.assertFalse(data['initialized'])
+        self.assertFalse(data['committed'])
+        self.assertEqual(self.head_subject(repo), 'initial')
+        # an existing repo's working tree is not swept into a commit
+        self.assertEqual(self.ok('git-status', '--path', repo)['untracked'], ['dirty.txt'])
+
+    def test_repo_without_commits_gets_its_first(self):
+        repo = os.path.join(self.home, 'unborn')
+        os.makedirs(repo)
+        self.git('init', cwd=repo)
+        self.assertFalse(self.ok('git-status', '--path', repo)['hasCommit'])
+        data = self.ok('git-init', '--path', repo)
+        self.assertFalse(data['initialized'])  # already a repo
+        self.assertTrue(data['committed'])     # but it had no commit to branch from
+        self.assertTrue(self.ok('git-status', '--path', repo)['hasCommit'])
+
+    def test_commits_without_any_git_identity_configured(self):
+        # a fresh server usually has no user.name/user.email; the commit must
+        # still succeed rather than failing with "please tell me who you are"
+        plain = os.path.join(self.home, 'noident')
+        os.makedirs(plain)
+        env = self.env()
+        env['HOME'] = self.home          # away from the developer's ~/.gitconfig
+        env['GIT_CONFIG_NOSYSTEM'] = '1'
+        for var in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',
+                    'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL'):
+            env.pop(var, None)
+        proc = subprocess.run(
+            [sys.executable, HELPER, 'git-init', '--path', plain],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, env=env, timeout=60
+        )
+        doc = json.loads(proc.stdout)
+        self.assertTrue(doc['ok'], '%r (stderr: %r)' % (doc, proc.stderr))
+        self.assertTrue(doc['data']['committed'])
+
+    def test_refuses_home_and_root(self):
+        self.fail_code('bad-args', 'git-init', '--path', '/')
+        self.fail_code('bad-args', 'git-init', '--path', '~')
+
+    def test_rejects_a_file_path(self):
+        target = os.path.join(self.home, 'afile')
+        with open(target, 'w') as fh:
+            fh.write('x\n')
+        self.fail_code('not-a-dir', 'git-init', '--path', target)
+
+
+class LsTreesTests(HelperTestCase):
+    def make_dirs(self):
+        a = os.path.join(self.home, 'a')
+        b = os.path.join(self.home, 'b')
+        os.makedirs(a)
+        os.makedirs(b)
+        with open(os.path.join(a, 'one.txt'), 'w') as fh:
+            fh.write('1\n')
+        with open(os.path.join(b, '.hidden'), 'w') as fh:
+            fh.write('h\n')
+        return a, b
+
+    def test_lists_several_directories_in_one_call(self):
+        a, b = self.make_dirs()
+        data = self.ok('ls-trees', '--path', a, '--path', b)
+        self.assertEqual([t['path'] for t in data['trees']], [a, b])
+        self.assertEqual([e['name'] for e in data['trees'][0]['entries']], ['one.txt'])
+        self.assertEqual(data['trees'][1]['entries'], [])
+
+    def test_hidden_flag_applies_to_every_path(self):
+        _a, b = self.make_dirs()
+        data = self.ok('ls-trees', '--path', b, '--hidden')
+        self.assertEqual([e['name'] for e in data['trees'][0]['entries']], ['.hidden'])
+
+    def test_one_bad_path_does_not_sink_the_batch(self):
+        a, _b = self.make_dirs()
+        missing = os.path.join(self.home, 'gone')
+        data = self.ok('ls-trees', '--path', a, '--path', missing)
+        self.assertEqual(len(data['trees'][0]['entries']), 1)
+        self.assertEqual(data['trees'][1]['path'], missing)
+        self.assertEqual(data['trees'][1]['error']['code'], 'not-found')
+        self.assertNotIn('entries', data['trees'][1])
+
+    def test_matches_single_ls_tree(self):
+        a, _b = self.make_dirs()
+        one = self.ok('ls-tree', '--path', a)
+        many = self.ok('ls-trees', '--path', a)
+        self.assertEqual(many['trees'][0]['entries'], one['entries'])
+
+
+class FsEditTests(HelperTestCase):
+    def touch(self, *parts):
+        path = os.path.join(self.home, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fh:
+            fh.write('x\n')
+        return path
+
+    def test_move_file_into_another_dir(self):
+        src = self.touch('a', 'note.txt')
+        os.makedirs(os.path.join(self.home, 'b'))
+        dest = os.path.join(self.home, 'b', 'note.txt')
+
+        data = self.ok('fs-move', '--src', src, '--dest', dest)
+        self.assertEqual(data['path'], dest)
+        self.assertFalse(os.path.exists(src))
+        self.assertTrue(os.path.isfile(dest))
+
+    def test_move_renames_in_place(self):
+        src = self.touch('a', 'old.txt')
+        dest = os.path.join(self.home, 'a', 'new.txt')
+        self.ok('fs-move', '--src', src, '--dest', dest)
+        self.assertTrue(os.path.isfile(dest))
+
+    def test_move_never_overwrites(self):
+        src = self.touch('a', 'one.txt')
+        dest = self.touch('a', 'two.txt')
+        self.fail_code('exists', 'fs-move', '--src', src, '--dest', dest)
+        self.assertTrue(os.path.isfile(src))
+
+    def test_move_missing_source(self):
+        self.fail_code('not-found', 'fs-move',
+                       '--src', os.path.join(self.home, 'nope'),
+                       '--dest', os.path.join(self.home, 'other'))
+
+    def test_move_into_missing_parent(self):
+        src = self.touch('a', 'one.txt')
+        self.fail_code('not-a-dir', 'fs-move', '--src', src,
+                       '--dest', os.path.join(self.home, 'gone', 'one.txt'))
+
+    def test_move_dir_into_itself(self):
+        self.touch('tree', 'inner', 'f.txt')
+        src = os.path.join(self.home, 'tree')
+        self.fail_code('bad-args', 'fs-move', '--src', src,
+                       '--dest', os.path.join(src, 'inner', 'tree'))
+
+    def test_delete_file(self):
+        path = self.touch('a', 'gone.txt')
+        self.ok('fs-delete', '--path', path)
+        self.assertFalse(os.path.exists(path))
+
+    def test_delete_empty_dir(self):
+        path = os.path.join(self.home, 'empty')
+        os.makedirs(path)
+        self.ok('fs-delete', '--path', path)
+        self.assertFalse(os.path.exists(path))
+
+    def test_delete_non_empty_dir_needs_recursive(self):
+        self.touch('full', 'f.txt')
+        path = os.path.join(self.home, 'full')
+        self.fail_code('not-empty', 'fs-delete', '--path', path)
+        self.assertTrue(os.path.isdir(path))
+
+        self.ok('fs-delete', '--path', path, '--recursive')
+        self.assertFalse(os.path.exists(path))
+
+    def test_delete_symlink_leaves_target(self):
+        target = self.touch('a', 'real.txt')
+        link = os.path.join(self.home, 'a', 'link.txt')
+        os.symlink(target, link)
+        self.ok('fs-delete', '--path', link)
+        self.assertFalse(os.path.lexists(link))
+        self.assertTrue(os.path.isfile(target))
+
+    def test_delete_missing_path(self):
+        self.fail_code('not-found', 'fs-delete',
+                       '--path', os.path.join(self.home, 'nope'))
+
+    def test_refuses_dangerous_roots(self):
+        self.fail_code('bad-args', 'fs-delete', '--path', '/')
+        self.fail_code('bad-args', 'fs-delete', '--path', self.home)
+        self.fail_code('bad-args', 'fs-move', '--src', '/',
+                       '--dest', os.path.join(self.home, 'x'))
+
+    def test_mkdir(self):
+        path = os.path.join(self.home, 'a', 'b', 'c')
+        data = self.ok('fs-mkdir', '--path', path)
+        self.assertEqual(data['path'], path)
+        self.assertTrue(os.path.isdir(path))
+        self.fail_code('exists', 'fs-mkdir', '--path', path)
 
 
 @unittest.skipUnless(GIT, 'git not installed')

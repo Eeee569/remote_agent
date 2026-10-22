@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TreeEntry } from '@shared/domain'
 import { api } from '@/api'
+import PromptDialog from '@/components/common/PromptDialog'
+import { joinPath, validName } from '@/components/files/path-util'
+import { newFolderSpec } from '@/components/files/prompt-specs'
+import type { PromptSpec } from '@/components/files/prompt-specs'
 
 interface RemoteDirPickerProps {
   hostId: string
@@ -8,6 +12,12 @@ interface RemoteDirPickerProps {
   onPick: (path: string) => void
   onClose: () => void
   dirsOnly?: boolean
+  /** Offer "New folder" in the directory being browsed; it opens once created. */
+  allowCreate?: boolean
+}
+
+interface PromptState extends PromptSpec {
+  onSubmit(value: string): void
 }
 
 function errText(err: unknown): string {
@@ -31,11 +41,16 @@ export default function RemoteDirPicker({
   initialPath,
   onPick,
   onClose,
-  dirsOnly
+  dirsOnly,
+  allowCreate
 }: RemoteDirPickerProps): React.JSX.Element {
   const [path, setPath] = useState<string>('')
   const [input, setInput] = useState<string>('')
   const [entries, setEntries] = useState<TreeEntry[]>([])
+  /** every name in the directory, files included, for collision checks */
+  const [names, setNames] = useState<string[]>([])
+  const [prompt, setPrompt] = useState<PromptState | null>(null)
+  const [creating, setCreating] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -48,14 +63,15 @@ export default function RemoteDirPicker({
     }
   }, [])
 
+  /** List `target` and make it current; false when it could not be listed. */
   const navigate = useCallback(
-    async (target: string) => {
+    async (target: string): Promise<boolean> => {
       setLoading(true)
       setError(null)
       try {
         const list = await api.fsLsTree(hostId, target)
-        if (!mounted.current) return
-        const filtered = dirsOnly ? list.filter(isDirLike) : list
+        if (!mounted.current) return false
+        const filtered = dirsOnly ? list.filter(isDirLike) : [...list]
         filtered.sort((a, b) => {
           const da = isDirLike(a) ? 0 : 1
           const db = isDirLike(b) ? 0 : 1
@@ -63,12 +79,14 @@ export default function RemoteDirPicker({
           return a.name.localeCompare(b.name)
         })
         setEntries(filtered)
+        setNames(list.map((e) => e.name))
         setPath(target)
         setInput(target)
         setSelectedFile(null)
+        return true
       } catch (err) {
-        if (!mounted.current) return
-        setError(errText(err))
+        if (mounted.current) setError(errText(err))
+        return false
       } finally {
         if (mounted.current) setLoading(false)
       }
@@ -76,11 +94,39 @@ export default function RemoteDirPicker({
     [hostId, dirsOnly]
   )
 
+  const createFolder = (): void => {
+    const dir = path
+    setPrompt({
+      ...newFolderSpec(dir, names),
+      onSubmit: (value) => {
+        const name = validName(value)
+        if (name === null) return
+        setCreating(true)
+        void (async () => {
+          try {
+            const created = await api.fsMkdir(hostId, joinPath(dir, name))
+            if (mounted.current) await navigate(created)
+          } catch (err) {
+            if (mounted.current) setError(`Could not create folder: ${errText(err)}`)
+          } finally {
+            if (mounted.current) setCreating(false)
+          }
+        })()
+      }
+    })
+  }
+
+
   useEffect(() => {
     void (async () => {
       try {
-        const start = initialPath && initialPath.trim() !== '' ? initialPath : await api.fsHome(hostId)
-        await navigate(start)
+        const requested = initialPath?.trim() ?? ''
+        if (requested !== '' && (await navigate(requested))) return
+        // a typed path that does not exist yet still needs somewhere to
+        // browse (and create) from — start at home and keep the error visible
+        const failure = requested !== '' ? `Could not open ${requested}` : null
+        const ok = await navigate(await api.fsHome(hostId))
+        if (ok && failure !== null && mounted.current) setError(`${failure} — showing your home directory.`)
       } catch (err) {
         if (mounted.current) {
           setError(errText(err))
@@ -222,19 +268,49 @@ export default function RemoteDirPicker({
           )}
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {allowCreate && (
+            <>
+              <button
+                className='ra-btn'
+                disabled={loading || creating || path === ''}
+                title={`Create a folder in ${path} and open it`}
+                onClick={createFolder}
+              >
+                New folder…
+              </button>
+            </>
+          )}
+          <div style={{ flex: 1 }} />
           <button className='ra-btn' onClick={onClose}>
             Cancel
           </button>
           <button
             className='ra-btn primary'
-            disabled={loading || path === ''}
+            disabled={loading || creating || path === ''}
             onClick={() => onPick(selectedFile ?? path)}
           >
             Select
           </button>
         </div>
       </div>
+
+      {prompt && (
+        <PromptDialog
+          key={prompt.title}
+          title={prompt.title}
+          label={prompt.label}
+          initialValue={prompt.initialValue}
+          confirmLabel={prompt.confirmLabel}
+          placeholder={prompt.placeholder}
+          validate={prompt.validate}
+          onSubmit={(value) => {
+            setPrompt(null)
+            prompt.onSubmit(value)
+          }}
+          onCancel={() => setPrompt(null)}
+        />
+      )}
     </div>
   )
 }

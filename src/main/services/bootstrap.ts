@@ -212,9 +212,27 @@ export async function installTargets(
 const ensuring = new Map<string, Promise<void>>()
 
 /**
+ * Uploads tmux.conf when the host's copy differs from the embedded source. The
+ * helper's version probe covers only helper.py, so without this an edit to the
+ * conf would never reach a host whose helper is already current.
+ */
+async function ensureTmuxConf(hostId: string, emit: (line: string) => void): Promise<void> {
+  const sftp = getSftpService(hostId)
+  const want = Buffer.from(TMUX_CONF_SOURCE, 'utf8')
+  try {
+    const cur = await sftp.readFile(HELPER_TMUX_CONF, want.length + 1)
+    if (!cur.truncated && cur.data.equals(want)) return
+  } catch {
+    // missing or unreadable: fall through and write it
+  }
+  emit(`updating ${HELPER_TMUX_CONF}`)
+  await sftp.writeFileAtomic(HELPER_TMUX_CONF, want, 0o644)
+}
+
+/**
  * Called after each (re)connect: installs/updates the helper when its version
- * probe fails or the installed sha256 differs from the embedded source.
- * Concurrent calls per host are coalesced. Never throws.
+ * probe fails or the installed sha256 differs from the embedded source, and
+ * keeps tmux.conf in step. Concurrent calls per host are coalesced. Never throws.
  */
 export function ensureHelper(hostId: string, onProgress?: Progress): Promise<void> {
   const inflight = ensuring.get(hostId)
@@ -227,8 +245,12 @@ export function ensureHelper(hostId: string, onProgress?: Progress): Promise<voi
     } catch {
       stale = true
     }
-    if (!stale) return
-    await installTargets(hostId, ['helper'], onProgress ?? (() => undefined))
+    if (stale) {
+      // installs the conf along with the helper
+      await installTargets(hostId, ['helper'], onProgress ?? (() => undefined))
+      return
+    }
+    await ensureTmuxConf(hostId, (line) => onProgress?.({ hostId, target: 'helper', line }))
   })()
     .catch(() => undefined)
     .finally(() => {

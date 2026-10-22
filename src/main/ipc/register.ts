@@ -3,11 +3,12 @@
  * wired to the ssh/services layer. Errors cross the boundary as
  * "[code] message" strings; events are broadcast to all windows.
  */
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, clipboard, ipcMain } from 'electron'
 import { z, ZodError } from 'zod'
 import type {
   BootstrapProgressEvent,
   FileReadResult,
+  FileStat,
   HostSaveInput,
   ProjectLayout,
   TermDataEvent,
@@ -21,9 +22,12 @@ import {
   agentsScopeSchema,
   agentsWriteSchema,
   bootstrapInstallSchema,
+  clipboardWriteSchema,
   codexWizardOptionsSchema,
   fsPathSchema,
   fsReadSchema,
+  fsUploadClipboardSchema,
+  fsUploadPathsSchema,
   fsWriteSchema,
   hostIdSchema,
   hostSaveInputSchema,
@@ -32,6 +36,9 @@ import {
   sessionSpecSchema,
   settingsTargetSchema,
   settingsWriteSchema,
+  fsDeleteSchema,
+  fsLsTreesSchema,
+  fsMoveSchema,
   termOpenSchema,
   termResizeSchema,
   termWriteSchema
@@ -46,6 +53,8 @@ import { getHelperClient } from '../services/helper-client'
 import * as settingsSvc from '../services/settings'
 import * as state from '../services/state'
 import { buildAttachCommand } from '../services/tmux'
+import { clipboardPasteForTerminal, uploadClipboard } from '../services/clipboard-files'
+import { uploadLocalPaths } from '../services/upload'
 import { CodedError } from '../util/errors'
 
 // ---------------- local payload schemas ----------------
@@ -225,10 +234,26 @@ export function registerIpc(): void {
 
   handle(CH.termClose, termCloseSchema, ({ termId }) => terms.close(termId))
 
+  // ---------------- clipboard ----------------
+
+  ipcMain.on(CH.clipboardWrite, (_e, payload: unknown) => {
+    const r = clipboardWriteSchema.safeParse(payload)
+    // an oversized or malformed write is dropped: a terminal escape sequence
+    // asked for it, so there is no caller to report an error to
+    if (r.success) clipboard.writeText(r.data.text)
+  })
+
+  handle(CH.clipboardRead, null, () => clipboard.readText())
+  handle(CH.clipboardPaste, hostIdSchema, ({ hostId }) => clipboardPasteForTerminal(hostId))
+
   // ---------------- files / git ----------------
 
   handle(CH.fsLsTree, fsPathSchema, ({ hostId, path }) =>
     getHelperClient(hostId).lsTree(path, true)
+  )
+
+  handle(CH.fsLsTrees, fsLsTreesSchema, ({ hostId, paths }) =>
+    getHelperClient(hostId).lsTrees(paths, true)
   )
 
   handle(CH.fsRead, fsReadSchema, async (p): Promise<FileReadResult> => {
@@ -241,11 +266,34 @@ export function registerIpc(): void {
     }
   })
 
-  handle(CH.fsWrite, fsWriteSchema, async (p) => {
-    await getSftpService(p.hostId).writeFileAtomic(p.path, Buffer.from(p.data), p.mode)
+  handle(CH.fsWrite, fsWriteSchema, async (p): Promise<FileStat> => {
+    const sftp = getSftpService(p.hostId)
+    await sftp.writeFileAtomic(p.path, Buffer.from(p.data), p.mode)
+    // the caller uses the fresh mtime as its "unchanged since we wrote it"
+    // baseline, so autosave can tell its own write from someone else's
+    const st = await sftp.stat(p.path)
+    return st ?? { size: p.data.length, mtimeMs: Date.now(), isDir: false }
   })
 
+  handle(CH.fsStat, fsPathSchema, ({ hostId, path }) => getSftpService(hostId).stat(path))
+
   handle(CH.fsHome, hostIdSchema, ({ hostId }) => bootstrapSvc.remoteHome(hostId))
+
+  handle(CH.fsMove, fsMoveSchema, ({ hostId, src, dest }) =>
+    getHelperClient(hostId).fsMove(src, dest)
+  )
+
+  handle(CH.fsDelete, fsDeleteSchema, ({ hostId, path, recursive }) =>
+    getHelperClient(hostId).fsDelete(path, recursive)
+  )
+
+  handle(CH.fsMkdir, fsPathSchema, ({ hostId, path }) => getHelperClient(hostId).fsMkdir(path))
+  handle(CH.fsUploadPaths, fsUploadPathsSchema, ({ hostId, paths, remoteDir }) =>
+    uploadLocalPaths(hostId, paths, remoteDir)
+  )
+  handle(CH.fsUploadClipboard, fsUploadClipboardSchema, ({ hostId, remoteDir }) =>
+    uploadClipboard(hostId, remoteDir)
+  )
 
   handle(CH.gitStatus, fsPathSchema, ({ hostId, path }) => getHelperClient(hostId).gitStatus(path))
 

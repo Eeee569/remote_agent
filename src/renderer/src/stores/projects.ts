@@ -1,11 +1,20 @@
 import { create } from 'zustand'
 import type { ProjectMeta, SessionMeta, SessionSpec } from '@shared/domain'
 import { api } from '@/api'
+import { useFilesStore } from '@/stores/files'
 import { useUiStore } from '@/stores/ui'
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
+
+/**
+ * Sessions this client killed on purpose. The dock workspace drains this set
+ * to close their panels outright instead of leaving a "session gone"
+ * placeholder, which is only meaningful for sessions that vanished on their
+ * own (killed elsewhere, tmux server restarted, ...).
+ */
+export const killedByUser = new Set<string>()
 
 interface ProjectsState {
   projects: ProjectMeta[]
@@ -16,6 +25,8 @@ interface ProjectsState {
   removeProject(hostId: string, projectId: string): Promise<void>
   setActiveProject(id: string | null): void
   loadSessions(hostId: string, projectId: string): Promise<void>
+  /** resolves with the ids of projects whose sessions could not be listed */
+  loadAllSessions(hostId: string): Promise<Set<string>>
   createSession(hostId: string, projectId: string, spec: SessionSpec): Promise<SessionMeta>
   killSession(
     hostId: string,
@@ -89,6 +100,30 @@ export const useProjectsStore = create<ProjectsState>()((set, get) => ({
     }
   },
 
+  loadAllSessions: async (hostId) => {
+    // the cross-project grid needs every project's sessions, not just the
+    // active one; load them in parallel and fold the results in together so a
+    // slow project does not stall the rest
+    const projects = get().projects
+    const failed = new Set<string>()
+    const results = await Promise.all(
+      projects.map(async (p) => {
+        try {
+          return [p.id, await api.sessionList(hostId, p.id)] as const
+        } catch {
+          failed.add(p.id)
+          return [p.id, get().sessionsByProject[p.id] ?? []] as const
+        }
+      })
+    )
+    set((s) => {
+      const sessionsByProject = { ...s.sessionsByProject }
+      for (const [projectId, sessions] of results) sessionsByProject[projectId] = sessions
+      return { sessionsByProject }
+    })
+    return failed
+  },
+
   createSession: async (hostId, projectId, spec) => {
     try {
       const meta = await api.sessionCreate(hostId, projectId, spec)
@@ -108,6 +143,8 @@ export const useProjectsStore = create<ProjectsState>()((set, get) => ({
   killSession: async (hostId, projectId, sessionId, alsoRemoveWorktree) => {
     try {
       await api.sessionKill(hostId, projectId, sessionId, { alsoRemoveWorktree })
+      killedByUser.add(sessionId)
+      useFilesStore.getState().forgetSession(sessionId)
       set((s) => ({
         sessionsByProject: {
           ...s.sessionsByProject,

@@ -8,20 +8,24 @@ import { createHash } from 'crypto'
 import { z } from 'zod'
 import helperSource from '../../../server-helper/helper.py?raw'
 import tmuxConfSource from '../../../server-helper/tmux.conf?raw'
-import type { AgentKind, GitStatus, TreeEntry, Worktree } from '../../shared/domain'
+import type { AgentKind, GitStatus, TreeEntry, TreeListing, Worktree } from '../../shared/domain'
 import {
   HELPER_PATH,
   HelperError,
   helperEnvelopeSchema,
   helperVersionSchema,
+  fsPathResultSchema,
+  gitInitSchema,
   gitStatusSchema,
   lsTreeSchema,
+  lsTreesSchema,
   okSchema,
   readStateSchema,
   sessionListSchema,
   worktreeAddSchema,
   worktreeListSchema,
   writeStateSchema,
+  type HelperGitInit,
   type HelperReadState,
   type HelperSessionList,
   type HelperVersion
@@ -51,7 +55,8 @@ function stderrTail(text: string, limit = 300): string {
   return t.length > limit ? '…' + t.slice(-limit) : t
 }
 
-const WORKTREE_TIMEOUT_MS = 120_000
+/** Budget for the git calls that walk a whole tree, well past the 30s default. */
+const SLOW_GIT_TIMEOUT_MS = 120_000
 
 export class HelperClient {
   constructor(private readonly hostId: string) {}
@@ -104,8 +109,39 @@ export class HelperClient {
     return (await this.run('ls-tree', args, lsTreeSchema)).entries
   }
 
+  /** Several directories in one exec; each may carry its own error. */
+  async lsTrees(paths: string[], hidden?: boolean): Promise<TreeListing[]> {
+    if (paths.length === 0) return []
+    const args = [...paths.flatMap((p) => ['--path', p]), ...(hidden ? ['--hidden'] : [])]
+    return (await this.run('ls-trees', args, lsTreesSchema)).trees
+  }
+
   gitStatus(path: string): Promise<GitStatus> {
     return this.run('git-status', ['--path', path], gitStatusSchema)
+  }
+
+  /**
+   * Makes `path` a git repo holding at least one commit, creating the directory
+   * if it is missing. Slow budget: the initial commit stages the whole tree.
+   */
+  gitInit(path: string): Promise<HelperGitInit> {
+    return this.run('git-init', ['--path', path], gitInitSchema, {
+      timeoutMs: SLOW_GIT_TIMEOUT_MS
+    })
+  }
+
+  /** Move or rename; never overwrites an existing destination. */
+  async fsMove(src: string, dest: string): Promise<string> {
+    return (await this.run('fs-move', ['--src', src, '--dest', dest], fsPathResultSchema)).path
+  }
+
+  async fsDelete(path: string, recursive?: boolean): Promise<void> {
+    const args = ['--path', path, ...(recursive ? ['--recursive'] : [])]
+    await this.run('fs-delete', args, okSchema)
+  }
+
+  async fsMkdir(path: string): Promise<string> {
+    return (await this.run('fs-mkdir', ['--path', path], fsPathResultSchema)).path
   }
 
   async sessionList(): Promise<HelperSessionList['sessions']> {
@@ -149,7 +185,7 @@ export class HelperClient {
       opts.branch,
       ...(opts.base !== undefined ? ['--base', opts.base] : [])
     ]
-    return this.run('worktree-add', args, worktreeAddSchema, { timeoutMs: WORKTREE_TIMEOUT_MS })
+    return this.run('worktree-add', args, worktreeAddSchema, { timeoutMs: SLOW_GIT_TIMEOUT_MS })
   }
 
   async worktreeList(repo: string): Promise<Worktree[]> {
@@ -158,7 +194,7 @@ export class HelperClient {
 
   async worktreeRemove(repo: string, path: string, force?: boolean): Promise<void> {
     const args = ['--repo', repo, '--path', path, ...(force ? ['--force'] : [])]
-    await this.run('worktree-remove', args, okSchema, { timeoutMs: WORKTREE_TIMEOUT_MS })
+    await this.run('worktree-remove', args, okSchema, { timeoutMs: SLOW_GIT_TIMEOUT_MS })
   }
 
   readState(projectId?: string): Promise<HelperReadState> {

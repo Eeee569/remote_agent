@@ -12,7 +12,7 @@ import type {
   SessionMeta,
   SessionSpec
 } from '../../shared/domain'
-import { HelperError } from '../../shared/helper-protocol'
+import { HelperError, shellTmuxName } from '../../shared/helper-protocol'
 import { CodedError } from '../util/errors'
 import { newId } from '../util/ids'
 import { remoteHome } from './bootstrap'
@@ -81,16 +81,20 @@ async function resolveProject(hostId: string, projectId: string): Promise<Projec
   return project
 }
 
+/**
+ * A project may point at any directory. One that is not a git repo is made into
+ * one here (created first if it does not exist), because sessions are git
+ * worktrees: `git worktree add` needs a repo with a commit to branch from, so a
+ * bare `git init` would leave the default session flow broken.
+ */
 export async function projectAdd(
   hostId: string,
   name: string,
   repoPath: string
 ): Promise<ProjectMeta> {
-  const gs = await getHelperClient(hostId).gitStatus(repoPath)
-  if (!gs.isRepo) {
-    throw new CodedError('not-a-repo', `not a git repository: ${repoPath}`)
-  }
-  const meta: ProjectMeta = { id: newId('p_'), name, repoPath, createdAt: Date.now() }
+  const init = await getHelperClient(hostId).gitInit(repoPath)
+  // store the path git resolved, so "~/x" and "x/../x" cannot alias one project
+  const meta: ProjectMeta = { id: newId('p_'), name, repoPath: init.path, createdAt: Date.now() }
   await mutateState<IndexState>(hostId, undefined, (cur) => ({
     projects: [...(cur?.projects ?? []), meta]
   }))
@@ -219,6 +223,14 @@ export async function sessionKill(
     await client.sessionKill(meta.tmuxName)
   } catch (err) {
     if (!(err instanceof HelperError && err.code === 'session-missing')) throw err
+  }
+
+  // the companion shell is created lazily on first attach, so it often does
+  // not exist; a failure here must never block killing the session itself
+  try {
+    await client.sessionKill(shellTmuxName(meta.tmuxName))
+  } catch {
+    // no companion shell (or tmux already gone)
   }
 
   if (alsoRemoveWorktree && meta.mode === 'worktree' && meta.worktree) {

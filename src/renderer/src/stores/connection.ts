@@ -71,6 +71,8 @@ export const useConnectionStore = create<ConnectionState>()((set, get) => ({
     // projects belong to a host; reset the projects store on host switch and
     // reload immediately when the newly active host is already connected
     useProjectsStore.setState({ projects: [], activeProjectId: null, sessionsByProject: {} })
+    // the cross-project grid is scoped to the old host's sessions
+    useUiStore.getState().closeGlobalGrid()
     if (id && get().statusByHost[id]?.status === 'connected') {
       void useProjectsStore.getState().loadProjects(id)
     }

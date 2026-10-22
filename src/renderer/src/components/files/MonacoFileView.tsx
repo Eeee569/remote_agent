@@ -3,6 +3,7 @@ import type * as Monaco from 'monaco-editor'
 import { api } from '@/api'
 import { useUiStore } from '@/stores/ui'
 import MarkdownPreview from '@/components/files/MarkdownPreview'
+import { AUTOSAVE_DEBOUNCE_MS, remoteChangedSince } from '@/components/files/autosave'
 
 export interface MonacoFileViewProps {
   hostId: string
@@ -16,6 +17,8 @@ export interface MonacoFileViewProps {
 
 /** uri string -> last text loaded from / saved to the server */
 const savedTextByUri = new Map<string, string>()
+/** uri string -> mtime of the last content we read or wrote ourselves */
+const knownMtimeByUri = new Map<string, number>()
 /** uris whose loaded text is only the read-capped prefix of the remote file */
 const truncatedUris = new Set<string>()
 let monacoLoaded = false
@@ -32,6 +35,7 @@ export function fileUri(hostId: string, path: string): string {
 export async function disposeFileModel(hostId: string, path: string): Promise<void> {
   const uri = fileUri(hostId, path)
   savedTextByUri.delete(uri)
+  knownMtimeByUri.delete(uri)
   truncatedUris.delete(uri)
   if (!monacoLoaded) return
   try {
@@ -101,6 +105,9 @@ function errText(err: unknown): string {
 
 type Phase = 'loading' | 'text' | 'binary' | 'error'
 
+/** What the status chip in the header reports about the buffer. */
+type SaveState = 'idle' | 'saving' | 'saved' | 'conflict' | 'error'
+
 interface LoadedInfo {
   truncated: boolean
   size: number
@@ -132,16 +139,24 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
   const containerRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const changeSubRef = useRef<Monaco.IDisposable | null>(null)
+  const blurSubRef = useRef<Monaco.IDisposable | null>(null)
   const monacoRef = useRef<typeof Monaco | null>(null)
   const disposedRef = useRef(false)
   const dirtyRef = useRef(false)
-  const editingRef = useRef(false)
+  const autosaveTimerRef = useRef<number | null>(null)
+  const savingRef = useRef(false)
+  // files open editable; only truncated reads force read-only, because
+  // writing back a capped prefix would destroy the rest of the file
+  const editingRef = useRef(true)
 
   const [phase, setPhase] = useState<Phase>('loading')
   const [error, setError] = useState('')
   const [info, setInfo] = useState<LoadedInfo | null>(null)
   const [dirty, setDirty] = useState(false)
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState(true)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [saveError, setSaveError] = useState('')
   const [text, setText] = useState('')
   const [mdView, setMdView] = useState<'preview' | 'source'>('preview')
   const addToast = useUiStore((s) => s.addToast)
@@ -183,26 +198,87 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
     return monaco
   }
 
-  const save = async (): Promise<void> => {
+  const cancelAutosave = (): void => {
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
+  }
+
+  /**
+   * Write the buffer to the server. Autosaves stand down when the file has
+   * changed underneath us (an agent editing the same file, say) and say so
+   * instead; an explicit save asks before overwriting.
+   */
+  const save = async (opts: { auto: boolean }): Promise<void> => {
+    cancelAutosave()
     const model = editorRef.current?.getModel()
     if (!model || !dirtyRef.current) return
-    if (truncatedUris.has(uri)) {
-      // writing back the read-capped prefix would destroy the rest of the file
-      addToast('error', `${basename(path)} is truncated; saving is disabled`)
+    if (savingRef.current) {
+      // a write is already in flight; try again once it lands, or these
+      // keystrokes would sit unsaved until the next change
+      scheduleAutosaveRef.current()
       return
     }
+    if (truncatedUris.has(uri)) {
+      // writing back the read-capped prefix would destroy the rest of the file
+      if (!opts.auto) addToast('error', `${basename(path)} is truncated; saving is disabled`)
+      return
+    }
+
+    const value = model.getValue()
+    savingRef.current = true
+    if (!disposedRef.current) setSaveState('saving')
     try {
-      const value = model.getValue()
-      await api.fsWrite(hostId, path, new TextEncoder().encode(value))
+      const known = knownMtimeByUri.get(uri)
+      if (known !== undefined) {
+        const st = await api.fsStat(hostId, path)
+        if (remoteChangedSince(known, st?.mtimeMs ?? null)) {
+          if (opts.auto) {
+            if (!disposedRef.current) setSaveState('conflict')
+            return
+          }
+          const ok = window.confirm(
+            `${basename(path)} changed on the server since you opened it.\n\n` +
+              'Overwrite it with your version?'
+          )
+          if (!ok) {
+            if (!disposedRef.current) setSaveState('conflict')
+            return
+          }
+        }
+      }
+      const st = await api.fsWrite(hostId, path, new TextEncoder().encode(value))
       savedTextByUri.set(uri, value)
-      markDirty(false)
-      addToast('success', `Saved ${basename(path)}`)
+      knownMtimeByUri.set(uri, st.mtimeMs)
+      if (disposedRef.current) return
+      // typing during the write leaves the buffer dirty again
+      const current = editorRef.current?.getModel()?.getValue()
+      markDirty(current !== undefined && current !== value)
+      setSaveState('saved')
+      setSavedAt(Date.now())
     } catch (err) {
-      addToast('error', `Save failed: ${errText(err)}`)
+      if (disposedRef.current) return
+      setSaveState('error')
+      setSaveError(errText(err))
+      if (!opts.auto) addToast('error', `Save failed: ${errText(err)}`)
+    } finally {
+      savingRef.current = false
     }
   }
   const saveRef = useRef(save)
   saveRef.current = save
+
+  const scheduleAutosave = (): void => {
+    cancelAutosave()
+    if (!editingRef.current || truncatedUris.has(uri)) return
+    autosaveTimerRef.current = window.setTimeout(() => {
+      autosaveTimerRef.current = null
+      void saveRef.current({ auto: true })
+    }, AUTOSAVE_DEBOUNCE_MS)
+  }
+  const scheduleAutosaveRef = useRef(scheduleAutosave)
+  scheduleAutosaveRef.current = scheduleAutosave
 
   const attachEditor = (monaco: typeof Monaco, model: Monaco.editor.ITextModel): void => {
     const el = containerRef.current
@@ -227,14 +303,24 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
     })
     editorRef.current = editor
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      void saveRef.current()
+      void saveRef.current({ auto: false })
     })
     changeSubRef.current = editor.onDidChangeModelContent(() => {
       const m = editor.getModel()
       if (!m) return
       const value = m.getValue()
       setText(value)
-      markDirty(value !== savedTextByUri.get(uri))
+      const isDirty = value !== savedTextByUri.get(uri)
+      markDirty(isDirty)
+      if (isDirty) {
+        setSaveState('idle')
+        scheduleAutosaveRef.current()
+      }
+    })
+    // leaving the editor commits straight away, like an IDE's "save on focus
+    // loss" — no waiting out the debounce
+    blurSubRef.current = editor.onDidBlurEditorText(() => {
+      if (dirtyRef.current) void saveRef.current({ auto: true })
     })
   }
 
@@ -272,6 +358,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
         model.setValue(content)
       }
       savedTextByUri.set(uri, content)
+      knownMtimeByUri.set(uri, res.mtimeMs)
       if (loadedInfo.truncated) {
         truncatedUris.add(uri)
         setEditingEnabled(false)
@@ -294,15 +381,37 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
     disposedRef.current = false
     void load({ keepDirty: true })
     return () => {
+      // closing the tab, switching files, or hiding the panel must not lose
+      // edits: fire the write and let it finish without us
+      cancelAutosave()
+      if (dirtyRef.current) void saveRef.current({ auto: true })
       disposedRef.current = true
       changeSubRef.current?.dispose()
       changeSubRef.current = null
+      blurSubRef.current?.dispose()
+      blurSubRef.current = null
       editorRef.current?.dispose()
       editorRef.current = null
     }
     // the component is keyed per hostId+path by its parent
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostId, path])
+
+  // the app losing focus (or being hidden) commits too
+  useEffect(() => {
+    const flush = (): void => {
+      if (dirtyRef.current) void saveRef.current({ auto: true })
+    }
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    window.addEventListener('blur', flush)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('blur', flush)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [])
 
   const toggleEditing = (): void => {
     const next = !editingRef.current
@@ -321,6 +430,66 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
   const truncated = info?.truncated === true || truncatedUris.has(uri)
   const showEditor = phase === 'text' && (!isMarkdown || mdView === 'source')
   const smallBtn: React.CSSProperties = { padding: '1px 7px', fontSize: 11 }
+
+  // autosave means the header reports state rather than offering a button;
+  // the only cases needing a decision are a conflict or a failed write
+  const chipStyle = (color: string): React.CSSProperties => ({
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 10.5,
+    color
+  })
+  let statusChip: React.JSX.Element | null = null
+  if (phase === 'text') {
+    if (saveState === 'conflict') {
+      statusChip = (
+        <span style={chipStyle('var(--ra-yellow)')}>
+          <span title='Someone (or an agent) wrote this file after you opened it'>
+            changed on server
+          </span>
+          <button className='ra-btn' style={smallBtn} onClick={reload}>
+            Reload
+          </button>
+          <button
+            className='ra-btn'
+            style={smallBtn}
+            title='Overwrite the server copy with your version'
+            onClick={() => void save({ auto: false })}
+          >
+            Overwrite
+          </button>
+        </span>
+      )
+    } else if (saveState === 'error') {
+      statusChip = (
+        <span style={chipStyle('var(--ra-red)')}>
+          <span title={saveError}>save failed</span>
+          <button className='ra-btn' style={smallBtn} onClick={() => void save({ auto: false })}>
+            Retry
+          </button>
+        </span>
+      )
+    } else if (saveState === 'saving') {
+      statusChip = <span style={chipStyle('var(--ra-text-dim)')}>saving…</span>
+    } else if (dirty) {
+      statusChip = (
+        <span style={chipStyle('var(--ra-accent)')} title='Unsaved edits — saving shortly'>
+          ●
+        </span>
+      )
+    } else if (savedAt !== null) {
+      statusChip = (
+        <span
+          style={chipStyle('var(--ra-text-faint)')}
+          title={`Saved at ${new Date(savedAt).toLocaleTimeString()}`}
+        >
+          saved
+        </span>
+      )
+    }
+  }
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -365,9 +534,7 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
             truncated
           </span>
         )}
-        {dirty && (
-          <span style={{ flexShrink: 0, color: 'var(--ra-accent)', fontSize: 10 }}>●</span>
-        )}
+        {statusChip}
         <div style={{ flex: 1 }} />
         {isMarkdown && phase === 'text' && (
           <div
@@ -414,20 +581,14 @@ export default function MonacoFileView(props: MonacoFileViewProps): React.JSX.El
                 ? { borderColor: 'var(--ra-accent)', color: 'var(--ra-accent)' }
                 : {})
             }}
-            title={editing ? 'Disable editing' : 'Enable editing'}
+            title={
+              editing
+                ? 'Editable — click to protect this file from edits'
+                : 'Read-only — click to edit'
+            }
             onClick={toggleEditing}
           >
-            ✎
-          </button>
-        )}
-        {dirty && (
-          <button
-            className='ra-btn primary'
-            style={smallBtn}
-            title='Save to server (Cmd/Ctrl+S)'
-            onClick={() => void save()}
-          >
-            Save
+            {editing ? '✎' : '🔒'}
           </button>
         )}
       </div>

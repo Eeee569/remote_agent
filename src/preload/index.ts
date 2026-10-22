@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron'
 import { CH, RendererApi } from '../shared/ipc'
 import type {
   BootstrapProgressEvent,
@@ -39,10 +39,30 @@ const api: RendererApi = {
   onTermData: on<TermDataEvent>(CH.evtTermData),
   onTermExit: on<TermExitEvent>(CH.evtTermExit),
 
+  clipboardWrite: (text) => ipcRenderer.send(CH.clipboardWrite, { text }),
+  clipboardRead: () => ipcRenderer.invoke(CH.clipboardRead),
+  clipboardPaste: (hostId) => ipcRenderer.invoke(CH.clipboardPaste, { hostId }),
+
+  // the page hands over File objects, never path strings: only a real drop
+  // yields a File that maps to a local path, so the page cannot pick files
+  fsUploadFiles: (hostId, files, remoteDir) => {
+    const paths = files.map((f) => webUtils.getPathForFile(f)).filter((p) => p !== '')
+    if (paths.length === 0) return Promise.resolve([])
+    return ipcRenderer.invoke(CH.fsUploadPaths, { hostId, paths, remoteDir })
+  },
+  fsUploadClipboard: (hostId, remoteDir) =>
+    ipcRenderer.invoke(CH.fsUploadClipboard, { hostId, remoteDir }),
+
   fsLsTree: (hostId, path) => ipcRenderer.invoke(CH.fsLsTree, { hostId, path }),
+  fsLsTrees: (hostId, paths) => ipcRenderer.invoke(CH.fsLsTrees, { hostId, paths }),
   fsRead: (hostId, path, maxBytes) => ipcRenderer.invoke(CH.fsRead, { hostId, path, maxBytes }),
   fsWrite: (hostId, path, data, mode) => ipcRenderer.invoke(CH.fsWrite, { hostId, path, data, mode }),
   fsHome: (hostId) => ipcRenderer.invoke(CH.fsHome, { hostId }),
+  fsStat: (hostId, path) => ipcRenderer.invoke(CH.fsStat, { hostId, path }),
+  fsMove: (hostId, src, dest) => ipcRenderer.invoke(CH.fsMove, { hostId, src, dest }),
+  fsDelete: (hostId, path, recursive) =>
+    ipcRenderer.invoke(CH.fsDelete, { hostId, path, recursive }),
+  fsMkdir: (hostId, path) => ipcRenderer.invoke(CH.fsMkdir, { hostId, path }),
   gitStatus: (hostId, repoPath) => ipcRenderer.invoke(CH.gitStatus, { hostId, path: repoPath }),
 
   projectList: (hostId) => ipcRenderer.invoke(CH.projectList, { hostId }),

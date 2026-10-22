@@ -261,6 +261,34 @@ export class SftpService {
     )
   }
 
+  /**
+   * Copy a local file to `remotePath`. Streams with several requests in
+   * flight (one 32 KiB write at a time is latency-bound), into a temp name
+   * that is renamed over the target, so a dropped link leaves no half file.
+   */
+  async uploadFile(localPath: string, remotePath: string, size: number, mode: number): Promise<void> {
+    return this.run(
+      'uploadFile',
+      async (sftp) => {
+        const abs = await this.expand(sftp, remotePath)
+        const tmp = abs + '.ra-tmp-' + randomBytes(4).toString('hex')
+        try {
+          await new Promise<void>((resolve, reject) => {
+            sftp.fastPut(localPath, tmp, { concurrency: 16, chunkSize: IO_CHUNK, mode: TMP_MODE }, (err) =>
+              err ? reject(err) : resolve()
+            )
+          })
+          await sfChmod(sftp, tmp, mode)
+          await this.renameOver(sftp, tmp, abs)
+        } catch (err) {
+          await sfUnlink(sftp, tmp).catch(() => undefined)
+          throw err
+        }
+      },
+      transferTimeoutMs(size)
+    )
+  }
+
   async stat(path: string): Promise<{ isDir: boolean; size: number; mtimeMs: number } | null> {
     return this.run('stat', async (sftp) => {
       const abs = await this.expand(sftp, path)

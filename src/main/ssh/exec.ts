@@ -1,6 +1,11 @@
 /**
  * Promise wrappers around ssh2 `client.exec` for one-shot commands
  * (buffered) and streaming installer-style output (line-buffered).
+ *
+ * Every exec opens an SSH session channel, and sshd caps how many a single
+ * connection may hold open (MaxSessions, 10 by default). Attached terminals
+ * already hold one each, so exec calls are queued through a small per-client
+ * gate and retried when the server refuses a channel anyway.
  */
 import type { Client, ClientChannel } from 'ssh2'
 import { StringDecoder } from 'string_decoder'
@@ -15,7 +20,100 @@ export interface ExecResult {
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000
 const DEFAULT_STREAM_TIMEOUT_MS = 600_000
 
-export function execCommand(
+/** Concurrent exec channels per connection; the rest wait in line. */
+const MAX_CONCURRENT_EXEC = 3
+/** Backoff for retrying a refused channel, in ms. */
+const OPEN_RETRY_DELAYS = [150, 400, 900, 1800]
+
+interface Gate {
+  active: number
+  waiting: Array<() => void>
+}
+
+const gates = new WeakMap<Client, Gate>()
+
+function gateFor(client: Client): Gate {
+  let gate = gates.get(client)
+  if (!gate) {
+    gate = { active: 0, waiting: [] }
+    gates.set(client, gate)
+  }
+  return gate
+}
+
+function acquire(client: Client): Promise<void> {
+  const gate = gateFor(client)
+  if (gate.active < MAX_CONCURRENT_EXEC) {
+    gate.active++
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    gate.waiting.push(() => {
+      gate.active++
+      resolve()
+    })
+  })
+}
+
+function release(client: Client): void {
+  const gate = gateFor(client)
+  gate.active = Math.max(0, gate.active - 1)
+  const next = gate.waiting.shift()
+  if (next) next()
+}
+
+/** sshd refusing a new channel — usually MaxSessions, and usually transient. */
+function isChannelExhausted(err: Error): boolean {
+  return /channel open failure|open failed|administratively prohibited|resource shortage/i.test(
+    err.message
+  )
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * `client.exec` with retries while the server keeps refusing channels. The
+ * caller already holds a gate slot, so this only fires when something outside
+ * our accounting (terminals, another client) is using the connection.
+ */
+function openExecChannel(client: Client, command: string): Promise<ClientChannel> {
+  const attempt = (n: number): Promise<ClientChannel> =>
+    new Promise<ClientChannel>((resolve, reject) => {
+      client.exec(command, (err, stream) => {
+        if (err) reject(err)
+        else resolve(stream)
+      })
+    }).catch(async (err: Error) => {
+      if (n >= OPEN_RETRY_DELAYS.length || !isChannelExhausted(err)) {
+        if (isChannelExhausted(err)) {
+          throw new CodedError(
+            'channel-limit',
+            'the SSH server refused another channel (MaxSessions). Detach a terminal ' +
+              'or raise MaxSessions in sshd_config, then try again.'
+          )
+        }
+        throw err
+      }
+      await sleep(OPEN_RETRY_DELAYS[n])
+      return attempt(n + 1)
+    })
+  return attempt(0)
+}
+
+export async function execCommand(
+  client: Client,
+  command: string,
+  opts?: { timeoutMs?: number; stdin?: string | Buffer }
+): Promise<ExecResult> {
+  await acquire(client)
+  try {
+    return await runCommand(client, command, opts)
+  } finally {
+    release(client)
+  }
+}
+
+function runCommand(
   client: Client,
   command: string,
   opts?: { timeoutMs?: number; stdin?: string | Buffer }
@@ -42,8 +140,7 @@ export function execCommand(
       reject(err instanceof CodedError ? err : new CodedError('conn-failed', err.message))
     }
 
-    client.exec(command, (err, stream) => {
-      if (err) return fail(err)
+    openExecChannel(client, command).then((stream) => {
       channel = stream
       if (settled) {
         try {
@@ -81,11 +178,25 @@ export function execCommand(
       if (opts?.stdin !== undefined) {
         stream.end(opts.stdin)
       }
-    })
+    }, fail)
   })
 }
 
-export function execStream(
+export async function execStream(
+  client: Client,
+  command: string,
+  onLine: (line: string, stream: 'out' | 'err') => void,
+  opts?: { timeoutMs?: number }
+): Promise<{ code: number | null }> {
+  await acquire(client)
+  try {
+    return await runStream(client, command, onLine, opts)
+  } finally {
+    release(client)
+  }
+}
+
+function runStream(
   client: Client,
   command: string,
   onLine: (line: string, stream: 'out' | 'err') => void,
@@ -113,8 +224,7 @@ export function execStream(
       reject(err instanceof CodedError ? err : new CodedError('conn-failed', err.message))
     }
 
-    client.exec(command, (err, stream) => {
-      if (err) return fail(err)
+    openExecChannel(client, command).then((stream) => {
       channel = stream
       if (settled) {
         try {
@@ -165,6 +275,6 @@ export function execStream(
         flush('err')
         resolve({ code: exitCode })
       })
-    })
+    }, fail)
   })
 }

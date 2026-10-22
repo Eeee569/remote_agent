@@ -11,6 +11,8 @@ export interface FilesState {
   openFile(sessionId: string, path: string): void
   closeFile(sessionId: string, path: string): void
   setActive(sessionId: string, path: string | null): void
+  /** Drop everything remembered for a session (used when it is killed). */
+  forgetSession(sessionId: string): void
   hydrate(map: Record<string, string[]>): void
 }
 
@@ -43,6 +45,16 @@ export const useFilesStore = create<FilesState>()((set) => ({
 
   setActive: (sessionId, path) =>
     set((s) => ({ activeBySession: { ...s.activeBySession, [sessionId]: path } })),
+
+  forgetSession: (sessionId) =>
+    set((s) => {
+      if (!(sessionId in s.openBySession) && !(sessionId in s.activeBySession)) return s
+      const openBySession = { ...s.openBySession }
+      const activeBySession = { ...s.activeBySession }
+      delete openBySession[sessionId]
+      delete activeBySession[sessionId]
+      return { openBySession, activeBySession }
+    }),
 
   hydrate: (map) =>
     set((s) => {

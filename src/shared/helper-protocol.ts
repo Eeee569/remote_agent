@@ -11,6 +11,16 @@ export const HELPER_PATH = '~/.remote-agent/bin/helper'
 export const HELPER_TMUX_CONF = '~/.remote-agent/tmux.conf'
 /** tmux sessions created by the app are prefixed with this */
 export const TMUX_PREFIX = 'ra-'
+/** suffix of the companion plain-shell tmux session that every session gets */
+export const SHELL_SUFFIX = '-shell'
+
+/**
+ * tmux session name of a session's companion shell. Created lazily by the
+ * `new-session -A` attach the shell panel issues, killed with the session.
+ */
+export function shellTmuxName(tmuxName: string): string {
+  return tmuxName + SHELL_SUFFIX
+}
 
 export const helperErrorSchema = z.object({
   code: z.string(),
@@ -57,8 +67,20 @@ export const lsTreeSchema = z.object({
   entries: z.array(treeEntrySchema)
 })
 
+/** One batch entry: either a listing or the error that directory hit. */
+export const lsTreesSchema = z.object({
+  trees: z.array(
+    z.object({
+      path: z.string(),
+      entries: z.array(treeEntrySchema).optional(),
+      error: helperErrorSchema.optional()
+    })
+  )
+})
+
 export const gitStatusSchema = z.object({
   isRepo: z.boolean(),
+  hasCommit: z.boolean(),
   branch: z.string().nullable(),
   upstream: z.string().nullable(),
   ahead: z.number(),
@@ -66,6 +88,22 @@ export const gitStatusSchema = z.object({
   staged: z.array(z.string()),
   modified: z.array(z.string()),
   untracked: z.array(z.string())
+})
+
+/**
+ * git-init reports what it had to do: `initialized` when the directory was not
+ * a repo, `committed` when it had no commit for a worktree to branch from.
+ */
+export const gitInitSchema = z.object({
+  path: z.string(),
+  initialized: z.boolean(),
+  committed: z.boolean(),
+  branch: z.string().nullable()
+})
+
+/** fs-move / fs-mkdir echo the resulting absolute path. */
+export const fsPathResultSchema = z.object({
+  path: z.string()
 })
 
 export const tmuxSessionSchema = z.object({
@@ -110,6 +148,7 @@ export const okSchema = z.object({}).passthrough()
 export type HelperVersion = z.infer<typeof helperVersionSchema>
 export type HelperLsTree = z.infer<typeof lsTreeSchema>
 export type HelperGitStatus = z.infer<typeof gitStatusSchema>
+export type HelperGitInit = z.infer<typeof gitInitSchema>
 export type HelperSessionList = z.infer<typeof sessionListSchema>
 export type HelperWorktreeList = z.infer<typeof worktreeListSchema>
 export type HelperReadState = z.infer<typeof readStateSchema>
@@ -120,6 +159,8 @@ export const HELPER_ERROR_CODES = [
   'not-found',
   'not-a-repo',
   'not-a-dir',
+  'exists',
+  'not-empty',
   'conflict',
   'tmux-missing',
   'tmux-failed',

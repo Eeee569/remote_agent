@@ -7,6 +7,7 @@ import * as monaco from 'monaco-editor'
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
 import { claudeSettingsJsonSchema, mcpJsonSchema } from '@shared/claude-schemas'
+import { monacoColors } from '@/theme/tokens'
 
 self.MonacoEnvironment = {
   getWorker: (_id: string, label: string) => (label === 'json' ? new jsonWorker() : new editorWorker())
@@ -16,15 +17,7 @@ monaco.editor.defineTheme('ra-dark', {
   base: 'vs-dark',
   inherit: true,
   rules: [],
-  colors: {
-    'editor.background': '#161d27',
-    'editor.foreground': '#dbe4f0',
-    'editorLineNumber.foreground': '#5b6878',
-    'editor.lineHighlightBackground': '#1c2532',
-    'editorWidget.background': '#131a23',
-    'input.background': '#0d1117',
-    'focusBorder': '#3d8bfd'
-  }
+  colors: monacoColors()
 })
 
 monaco.languages.json.jsonDefaults.setDiagnosticsOptions({

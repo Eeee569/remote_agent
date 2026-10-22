@@ -1,7 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { IDockviewPanelProps } from 'dockview'
 import type { AgentKind } from '@shared/domain'
 import type { SessionPanelParams } from '@/components/dock/panels'
+import {
+  collapseSessionPanels,
+  expandSessionPanels,
+  isSessionTabbed,
+  openPanelCount,
+  sessionFrameStyle
+} from '@/components/dock/session-layout'
 import { useProjectsStore } from '@/stores/projects'
 import XtermView from '@/components/terminal/XtermView'
 
@@ -15,12 +22,27 @@ const smallBtn: React.CSSProperties = { padding: '2px 9px', fontSize: 11.5 }
 
 const TerminalPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (props) => {
   const { sessionId, hostId, projectId } = props.params
+  const containerApi = props.containerApi
   const session = useProjectsStore((s) =>
     (s.sessionsByProject[projectId] ?? []).find((x) => x.id === sessionId)
   )
   const killSession = useProjectsStore((s) => s.killSession)
   const [attached, setAttached] = useState(true)
   const [killing, setKilling] = useState(false)
+  // whether this session's panels are tabbed together right now, so the
+  // split/tabs control can offer the other arrangement
+  const [tabbed, setTabbed] = useState(true)
+  const [panelCount, setPanelCount] = useState(1)
+
+  useEffect(() => {
+    const read = (): void => {
+      setTabbed(isSessionTabbed(containerApi, sessionId))
+      setPanelCount(openPanelCount(containerApi, sessionId))
+    }
+    read()
+    const sub = containerApi.onDidLayoutChange(read)
+    return () => sub.dispose()
+  }, [containerApi, sessionId])
 
   if (!session) {
     return (
@@ -71,7 +93,14 @@ const TerminalPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (props)
         : 'tmux state unknown'
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div
+      style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        ...sessionFrameStyle(sessionId)
+      }}
+    >
       <div
         style={{
           flexShrink: 0,
@@ -122,6 +151,24 @@ const TerminalPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (props)
           {session.agent}
         </span>
         <div style={{ flex: 1 }} />
+        {panelCount > 1 && (
+          <button
+            className='ra-btn'
+            style={smallBtn}
+            title={
+              tabbed
+                ? 'Split this session’s files and viewer out beside the terminal'
+                : 'Put this session’s panels back together as tabs'
+            }
+            onClick={() =>
+              tabbed
+                ? expandSessionPanels(containerApi, session)
+                : collapseSessionPanels(containerApi, session)
+            }
+          >
+            {tabbed ? '⊞ Split' : '⊟ Tabs'}
+          </button>
+        )}
         <button
           className='ra-btn'
           style={smallBtn}

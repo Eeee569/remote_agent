@@ -1,28 +1,85 @@
-/* Remote Agent — dark modern theme tokens.
-   Single source of truth: dockview, xterm, and Monaco themes derive from these. */
+/* Remote Agent — VS Code "Dark Modern" palette.
+   Single source of truth: dockview, xterm, and Monaco all read these tokens
+   (see theme/tokens.ts), so re-skinning the app happens here alone. */
 
 :root {
-  --ra-bg: #0d1117;
-  --ra-bg-raised: #131a23;
-  --ra-bg-panel: #161d27;
-  --ra-bg-hover: #1c2532;
-  --ra-bg-active: #22304a;
-  --ra-border: #253041;
-  --ra-border-strong: #33415a;
-  --ra-text: #dbe4f0;
-  --ra-text-dim: #8b98ab;
-  --ra-text-faint: #5b6878;
-  --ra-accent: #6ea8fe;
-  --ra-accent-strong: #3d8bfd;
-  --ra-accent-dim: rgba(110, 168, 254, 0.15);
-  --ra-green: #3fb97f;
-  --ra-yellow: #d9a63f;
-  --ra-red: #e5636e;
-  --ra-purple: #b98af0;
+  /* chrome: neutral grays. Side surfaces (tree, tab strips, title bar) sit a
+     shade darker than the content surfaces (editor, terminal), as in VS Code */
+  --ra-bg: #1f1f1f;
+  --ra-bg-raised: #181818;
+  --ra-bg-panel: #1f1f1f;
+  --ra-bg-side: #181818;
+  --ra-bg-hover: #2a2d2e;
+  --ra-bg-active: #37373d;
+  --ra-border: #2b2b2b;
+  --ra-border-strong: #3c3c3c;
+  --ra-text: #cccccc;
+  --ra-text-dim: #9d9d9d;
+  --ra-text-faint: #7a7a7a;
+
+  /* accents */
+  --ra-accent: #3794ff;
+  --ra-accent-strong: #0078d4;
+  --ra-accent-dim: rgba(55, 148, 255, 0.15);
+  /* list.activeSelectionBackground — a solid fill, never mistaken for hover */
+  --ra-selected-bg: #04395e;
+  --ra-selected-text: #ffffff;
+  /* text drawn on top of an accent fill */
+  --ra-on-accent: #ffffff;
+  --ra-green: #89d185;
+  --ra-yellow: #cca700;
+  --ra-red: #f14c4c;
+  --ra-purple: #c586c0;
+  --ra-orange: #ce9178;
+
+  /* git decorations (VS Code gitDecoration.*) */
+  --ra-git-modified: #e2c08d;
+  --ra-git-added: #81b88b;
+  --ra-git-untracked: #73c991;
+  --ra-git-deleted: #c74e39;
+  --ra-git-ignored: #8c8c8c;
+
+  /* file-type icon tints: desaturated, close in luminance, never neon —
+     they should hint at the kind of file without competing with git colours */
+  --ra-icon-code: #6b8fa3;
+  --ra-icon-data: #948a6a;
+  --ra-icon-markup: #a8785c;
+  --ra-icon-media: #8a76a3;
+  --ra-icon-doc: #6d8086;
+  --ra-icon-plain: #77797a;
+
+  /* terminal palette (xterm reads these through theme/tokens.ts) */
+  --ra-term-bg: #1f1f1f;
+  --ra-term-fg: #cccccc;
+  --ra-term-cursor: #cccccc;
+  --ra-term-selection: rgba(38, 79, 120, 0.99);
+  --ra-ansi-black: #1f1f1f;
+  --ra-ansi-red: #cd3131;
+  --ra-ansi-green: #0dbc79;
+  --ra-ansi-yellow: #e5e510;
+  --ra-ansi-blue: #2472c8;
+  --ra-ansi-magenta: #bc3fbc;
+  --ra-ansi-cyan: #11a8cd;
+  --ra-ansi-white: #e5e5e5;
+  --ra-ansi-bright-black: #666666;
+  --ra-ansi-bright-red: #f14c4c;
+  --ra-ansi-bright-green: #23d18b;
+  --ra-ansi-bright-yellow: #f5f543;
+  --ra-ansi-bright-blue: #3b8eea;
+  --ra-ansi-bright-magenta: #d670d6;
+  --ra-ansi-bright-cyan: #29b8db;
+  --ra-ansi-bright-white: #e5e5e5;
+
+  /* form controls sit lighter than their surface, as in VS Code */
+  --ra-input-bg: #313131;
+
   --ra-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, sans-serif;
   --ra-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --ra-radius: 6px;
   --ra-titlebar-h: 38px;
+
+  /* native widgets (select popups, form controls) follow the dark theme */
+  color-scheme: dark;
 }
 
 * {
@@ -86,7 +143,8 @@ button.ra-btn:disabled {
 button.ra-btn.primary {
   background: var(--ra-accent-strong);
   border-color: var(--ra-accent-strong);
-  color: #fff;
+  color: var(--ra-on-accent);
+  font-weight: 600;
 }
 button.ra-btn.primary:hover {
   filter: brightness(1.1);
@@ -99,7 +157,7 @@ button.ra-btn.danger {
 input.ra-input,
 select.ra-input,
 textarea.ra-input {
-  background: var(--ra-bg);
+  background: var(--ra-input-bg);
   color: var(--ra-text);
   border: 1px solid var(--ra-border-strong);
   border-radius: var(--ra-radius);
@@ -108,6 +166,17 @@ textarea.ra-input {
   font-family: var(--ra-font);
   outline: none;
 }
+/* macOS renders a native select regardless of background, so draw our own */
+select.ra-input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 22px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239d9d9d' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 9px 6px;
+}
+
 input.ra-input:focus,
 select.ra-input:focus,
 textarea.ra-input:focus {
@@ -153,6 +222,42 @@ label.ra-label {
   font-weight: 600;
 }
 
+/* file tree rows: hover, selection, and drag-drop target */
+.ra-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+  border-left: 2px solid transparent;
+}
+
+.ra-tree-row:hover {
+  background: var(--ra-bg-hover);
+}
+
+.ra-tree-row.ra-selected,
+.ra-tree-row.ra-selected:hover {
+  background: var(--ra-selected-bg);
+  border-left-color: var(--ra-accent-strong);
+  outline: 1px solid var(--ra-accent-strong);
+  outline-offset: -1px;
+}
+
+.ra-tree-row.ra-selected,
+.ra-tree-row.ra-selected .ra-tree-name {
+  color: var(--ra-selected-text);
+}
+
+.ra-tree-row.ra-drop-target {
+  background: var(--ra-accent-dim);
+  border-left-color: var(--ra-accent);
+  outline: 1px solid var(--ra-accent);
+  outline-offset: -1px;
+}
+
 /* dockview theme overrides (extends dockview-theme-dark) */
 .dockview-theme-ra {
   --dv-background-color: var(--ra-bg);
@@ -172,4 +277,27 @@ label.ra-label {
   --dv-drag-over-border-color: var(--ra-accent);
   --dv-tab-divider-color: var(--ra-border);
   --dv-floating-box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+}
+
+/* Tiled modes (columns / rows): one group per session. Sessions are told
+   apart by the divider and each panel's accent stripe, so the tab strip
+   shrinks out of the way instead of eating the tile. */
+.dockview-theme-ra.ra-tiled {
+  --dv-tabs-and-actions-container-height: 24px;
+  --dv-tabs-and-actions-container-font-size: 11px;
+  --dv-tab-font-size: 11px;
+  --dv-separator-border: var(--ra-border-strong);
+}
+
+.dockview-theme-ra.ra-tiled .dv-groupview {
+  box-shadow: inset 0 0 0 1px var(--ra-border-strong);
+}
+
+.dockview-theme-ra.ra-tiled .dv-default-tab {
+  padding: 0 8px;
+}
+
+/* the divider between tiles reads as a border, not a drag handle */
+.dockview-theme-ra.ra-tiled .dv-sash {
+  background-color: var(--ra-border-strong);
 }

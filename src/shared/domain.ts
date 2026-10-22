@@ -154,10 +154,25 @@ export interface Worktree {
 
 // ---------- Server-persisted state ----------
 
+/**
+ * How a project's session panels are arranged in the dock workspace.
+ * "focus" shows one session at a time; the rest tile every session at once.
+ */
+export type SessionLayoutMode = 'focus' | 'columns' | 'rows' | 'grid'
+
 export interface ProjectLayout {
   /** verbatim dockview api.toJSON() output */
   dockview: unknown | null
   openFilesBySession: Record<string, string[]>
+  /**
+   * Panel ids ("term:<sessionId>", "shell:...", "tree:...", "view:...") the
+   * user closed. Kept so panel reconciliation does not resurrect them; a
+   * session whose terminal is listed here is hidden from the workspace.
+   */
+  closedPanels?: string[]
+  sessionLayoutMode?: SessionLayoutMode
+  /** the session "focus" mode shows; ignored by the tiling modes */
+  focusedSessionId?: string | null
   schemaVersion: number
 }
 
@@ -184,8 +199,17 @@ export interface TreeEntry {
   linkTargetType?: 'dir' | 'file'
 }
 
+/** One directory of a batched listing; `error` is set when it could not be read. */
+export interface TreeListing {
+  path: string
+  entries?: TreeEntry[]
+  error?: { code: string; message: string }
+}
+
 export interface GitStatus {
   isRepo: boolean
+  /** false on an unborn HEAD — a `git init` with no commit yet */
+  hasCommit: boolean
   branch: string | null
   upstream: string | null
   ahead: number
@@ -194,6 +218,19 @@ export interface GitStatus {
   modified: string[]
   untracked: string[]
 }
+
+/** Result of a stat on a remote path. */
+export interface FileStat {
+  size: number
+  mtimeMs: number
+  isDir: boolean
+}
+
+/** What a terminal paste resolved to; copied files arrive already uploaded. */
+export type ClipboardPaste =
+  | { kind: 'text'; text: string }
+  | { kind: 'files'; paths: string[] }
+  | { kind: 'empty' }
 
 export interface FileReadResult {
   /** UTF-8 bytes of the file (possibly truncated) */

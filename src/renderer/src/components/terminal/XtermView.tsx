@@ -6,7 +6,13 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import type { TermExitReason } from '@shared/domain'
 import { api } from '@/api'
+import ContextMenu from '@/components/common/ContextMenu'
+import { terminalKeyAction } from '@/components/terminal/clipboard-keys'
+import { isExternalFileDrag, pastedPathsText } from '@/components/terminal/file-paste'
+import { parseOsc52 } from '@/components/terminal/osc52'
 import { useConnectionStore } from '@/stores/connection'
+import { useUiStore } from '@/stores/ui'
+import { terminalBackground, xtermTheme } from '@/theme/tokens'
 
 export interface XtermViewProps {
   hostId: string
@@ -16,29 +22,11 @@ export interface XtermViewProps {
   onExited?: (reason: TermExitReason) => void
 }
 
-/** Dark theme derived from theme/dark.css tokens. */
-const XTERM_THEME = {
-  background: '#10161f',
-  foreground: '#dbe4f0',
-  cursor: '#6ea8fe',
-  selectionBackground: 'rgba(110,168,254,0.3)',
-  black: '#1c2532',
-  red: '#e5636e',
-  green: '#3fb97f',
-  yellow: '#d9a63f',
-  blue: '#6ea8fe',
-  magenta: '#b98af0',
-  cyan: '#56c2d6',
-  white: '#dbe4f0',
-  brightBlack: '#5b6878',
-  brightRed: '#f0808a',
-  brightGreen: '#5fd69b',
-  brightYellow: '#eec36a',
-  brightBlue: '#8fbcff',
-  brightMagenta: '#cfa9f7',
-  brightCyan: '#7fd8e8',
-  brightWhite: '#f2f6fb'
-}
+
+const isMac = navigator.platform.startsWith('Mac')
+
+/** a text paste is near-instant; only an upload lasts long enough to show */
+const UPLOAD_BADGE_DELAY_MS = 250
 
 const EXIT_LABEL: Record<TermExitReason, string> = {
   detach: 'Terminal channel closed',
@@ -70,10 +58,66 @@ export default function XtermView({
   const termIdRef = useRef<string | null>(null)
   const openingRef = useRef(false)
   const [exit, setExit] = useState<ExitInfo | null>(null)
+  const [menu, setMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null)
   const exitRef = useRef<ExitInfo | null>(null)
   exitRef.current = exit
   const onExitedRef = useRef(onExited)
   onExitedRef.current = onExited
+
+  /** Copy the terminal's own selection; false when there is nothing selected. */
+  const copySelection = useCallback((): boolean => {
+    const selection = termRef.current?.getSelection() ?? ''
+    if (selection === '') return false
+    api.clipboardWrite(selection)
+    return true
+  }, [])
+  const copyRef = useRef(copySelection)
+  copyRef.current = copySelection
+
+  const addToast = useUiStore((s) => s.addToast)
+  const [uploading, setUploading] = useState(false)
+  const [dropActive, setDropActive] = useState(false)
+
+  /** Runs a paste/upload, showing progress only when it is slow enough to notice. */
+  const withUpload = useCallback(
+    async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+      const timer = window.setTimeout(() => setUploading(true), UPLOAD_BADGE_DELAY_MS)
+      try {
+        return await fn()
+      } catch (err) {
+        addToast('error', `Paste failed: ${err instanceof Error ? err.message : String(err)}`)
+        return undefined
+      } finally {
+        window.clearTimeout(timer)
+        setUploading(false)
+      }
+    },
+    [addToast]
+  )
+
+  /** Uploaded files reach the agent as their host paths, as a local drag would. */
+  const pastePaths = useCallback((paths: string[]): void => {
+    const text = pastedPathsText(paths)
+    if (text !== '') termRef.current?.paste(text)
+    termRef.current?.focus()
+  }, [])
+
+  const pasteClipboard = useCallback((): void => {
+    void withUpload(() => api.clipboardPaste(hostId)).then((res) => {
+      // Terminal.paste honours bracketed-paste mode, so an agent CLI receives a
+      // multi-line paste as one block instead of a submit per newline
+      if (res?.kind === 'text') termRef.current?.paste(res.text)
+      else if (res?.kind === 'files') pastePaths(res.paths)
+    })
+  }, [hostId, pastePaths, withUpload])
+  const pasteRef = useRef(pasteClipboard)
+  pasteRef.current = pasteClipboard
+
+  const dropFiles = (files: File[]): void => {
+    void withUpload(() => api.fsUploadFiles(hostId, files, null)).then((paths) => {
+      if (paths) pastePaths(paths)
+    })
+  }
 
   const openChannel = useCallback(async (): Promise<void> => {
     const term = termRef.current
@@ -122,7 +166,45 @@ export default function XtermView({
       fontSize: 12.5,
       fontFamily: mono,
       allowProposedApi: true,
-      theme: XTERM_THEME
+      // tmux runs with mouse mode on, so a plain drag is forwarded to tmux
+      // rather than selecting; holding Option selects locally instead
+      macOptionClickForcesSelection: true,
+      theme: xtermTheme()
+    })
+
+    /*
+     * xterm keeps its selection in its own model, not the DOM, so the
+     * platform's Copy (which copies a DOM selection) finds nothing to take.
+     * Wire the shortcuts to the terminal's own selection and to the OS
+     * clipboard read in the main process instead.
+     */
+    term.attachCustomKeyEventHandler((e) => {
+      const action = terminalKeyAction(e, { isMac, hasSelection: term.hasSelection() })
+      if (action === 'pass') return true
+      /*
+       * Returning false only stops xterm from handling the key — the browser
+       * still runs its own default for the shortcut. For ⌘V that default is a
+       * second, native paste, which reaches an agent's prompt as duplicated
+       * text; for ⌘C it would race our write with a copy of the empty helper
+       * textarea.
+       */
+      e.preventDefault()
+      if (action === 'copy') copyRef.current()
+      if (action === 'paste') pasteRef.current()
+      if (action === 'select-all') term.selectAll()
+      return false
+    })
+
+    /*
+     * The only route from the host's clipboard to this Mac's: tmux copy-mode,
+     * an editor's oscyank, or an agent CLI's "copy" all emit OSC 52, which
+     * xterm.js does not implement. Writes only — parseOsc52 refuses the read
+     * request that would send the local clipboard back to the server.
+     */
+    term.parser.registerOscHandler(52, (payload) => {
+      const text = parseOsc52(payload)
+      if (text !== null) api.clipboardWrite(text)
+      return true // consumed either way, so a rejected payload is never printed
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -220,8 +302,128 @@ export default function XtermView({
   }, [connStatus, openChannel])
 
   return (
-    <div style={{ position: 'relative', height: '100%', width: '100%', background: '#10161f' }}>
-      <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
+    <div
+      style={{ position: 'relative', height: '100%', width: '100%', background: terminalBackground() }}
+      onDragOver={(e) => {
+        if (!isExternalFileDrag(Array.from(e.dataTransfer.types))) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+        if (!dropActive) setDropActive(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropActive(false)
+      }}
+      onDrop={(e) => {
+        setDropActive(false)
+        const files = Array.from(e.dataTransfer.files)
+        if (files.length === 0) return
+        e.preventDefault()
+        dropFiles(files)
+      }}
+    >
+      <div
+        ref={containerRef}
+        style={{ position: 'absolute', inset: 0 }}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          setMenu({
+            x: e.clientX,
+            y: e.clientY,
+            hasSelection: (termRef.current?.getSelection() ?? '') !== ''
+          })
+        }}
+      />
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          width={190}
+          entries={[
+            {
+              kind: 'item',
+              icon: '⧉',
+              label: `Copy${isMac ? '  ⌘C' : '  Ctrl+Shift+C'}`,
+              disabled: !menu.hasSelection,
+              title: menu.hasSelection
+                ? 'Copy the selected text'
+                : 'Nothing selected — hold ⌥ while dragging to select (tmux owns the mouse)',
+              onClick: () => {
+                copySelection()
+                setMenu(null)
+              }
+            },
+            {
+              kind: 'item',
+              icon: '⇥',
+              label: `Paste${isMac ? '  ⌘V' : '  Ctrl+Shift+V'}`,
+              title: 'Send the clipboard to the terminal',
+              onClick: () => {
+                pasteClipboard()
+                setMenu(null)
+              }
+            },
+            { kind: 'separator' },
+            {
+              kind: 'item',
+              icon: '▤',
+              label: 'Select all',
+              onClick: () => {
+                termRef.current?.selectAll()
+                setMenu(null)
+              }
+            },
+            {
+              kind: 'item',
+              icon: '✕',
+              label: 'Clear selection',
+              disabled: !menu.hasSelection,
+              onClick: () => {
+                termRef.current?.clearSelection()
+                setMenu(null)
+              }
+            }
+          ]}
+          onDismiss={() => setMenu(null)}
+        />
+      )}
+      {dropActive && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 6,
+            pointerEvents: 'none',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: '2px dashed var(--ra-accent)',
+            background: 'var(--ra-accent-dim)',
+            color: 'var(--ra-text)',
+            fontSize: 12.5
+          }}
+        >
+          Drop to upload and paste the path
+        </div>
+      )}
+      {uploading && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 8,
+            right: 12,
+            zIndex: 6,
+            pointerEvents: 'none',
+            padding: '3px 9px',
+            borderRadius: 4,
+            fontSize: 11.5,
+            background: 'var(--ra-bg-raised)',
+            border: '1px solid var(--ra-border-strong)',
+            color: 'var(--ra-text-dim)'
+          }}
+        >
+          Uploading…
+        </div>
+      )}
       {exit && (
         <div
           style={{

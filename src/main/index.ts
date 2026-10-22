@@ -47,13 +47,17 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    backgroundColor: '#0d1117',
+    // matches --ra-bg in renderer/theme/dark.css, so the frame does not flash
+    // a different shade before the renderer paints
+    backgroundColor: '#1f1f1f',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Chromium's built-in PDF viewer, which the file viewer embeds for .pdf
+      plugins: true
     }
   })
 

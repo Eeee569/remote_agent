@@ -12,6 +12,7 @@ Data shapes must stay in sync with src/shared/helper-protocol.ts.
 """
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -118,7 +119,26 @@ def cmd_version(_args):
 
 
 def cmd_ls_tree(args):
-    root = os.path.abspath(os.path.expanduser(args.path))
+    return _ls_tree(args.path, args.hidden)
+
+
+def cmd_ls_trees(args):
+    """Several directories in one round trip — the file tree refreshes every
+    expanded directory at once, and each ssh exec costs a channel."""
+    trees = []
+    for path in args.path:
+        try:
+            trees.append(dict(_ls_tree(path, args.hidden), path=path))
+        except HelperError as exc:
+            # one unreadable directory (deleted, permissions) must not sink
+            # the whole refresh
+            trees.append({'path': path, 'error': {'code': exc.code,
+                                                  'message': exc.message}})
+    return {'trees': trees}
+
+
+def _ls_tree(raw_path, hidden):
+    root = os.path.abspath(os.path.expanduser(raw_path))
     if not os.path.exists(root):
         raise HelperError('not-found', 'no such path: %s' % root)
     if not os.path.isdir(root):
@@ -128,7 +148,7 @@ def cmd_ls_tree(args):
     try:
         with os.scandir(root) as it:
             for entry in it:
-                if not args.hidden and entry.name.startswith('.'):
+                if not hidden and entry.name.startswith('.'):
                     continue
                 full = os.path.join(root, entry.name)
                 try:
@@ -169,6 +189,67 @@ def cmd_ls_tree(args):
     return {'entries': entries}
 
 
+# ---------------------------------------------------------------- fs edits
+
+
+def _fs_path(raw, label):
+    """Absolute, expanded path that is never the filesystem or home root."""
+    path = os.path.abspath(os.path.expanduser(raw))
+    if path == '/' or path == os.path.expanduser('~') or path == home_dir():
+        raise HelperError('bad-args', 'refusing to %s %s' % (label, path))
+    return path
+
+
+def cmd_fs_move(args):
+    src = _fs_path(args.src, 'move')
+    dest = _fs_path(args.dest, 'move onto')
+    if not os.path.lexists(src):
+        raise HelperError('not-found', 'no such path: %s' % src)
+    if os.path.lexists(dest):
+        raise HelperError('exists', 'already exists: %s' % dest)
+    parent = os.path.dirname(dest) or '/'
+    if not os.path.isdir(parent):
+        raise HelperError('not-a-dir', 'not a directory: %s' % parent)
+    # moving a directory inside itself would detach the subtree
+    if os.path.isdir(src) and not os.path.islink(src):
+        if dest == src or dest.startswith(src.rstrip('/') + '/'):
+            raise HelperError('bad-args', 'cannot move %s into itself' % src)
+    try:
+        shutil.move(src, dest)
+    except (OSError, shutil.Error) as exc:
+        raise HelperError('io-error', 'cannot move: %s' % exc)
+    return {'path': dest}
+
+
+def cmd_fs_delete(args):
+    path = _fs_path(args.path, 'delete')
+    if not os.path.lexists(path):
+        raise HelperError('not-found', 'no such path: %s' % path)
+    try:
+        if os.path.islink(path) or not os.path.isdir(path):
+            os.unlink(path)
+        elif args.recursive:
+            shutil.rmtree(path)
+        else:
+            os.rmdir(path)
+    except OSError as exc:
+        if getattr(exc, 'errno', None) == errno.ENOTEMPTY:
+            raise HelperError('not-empty', 'directory is not empty: %s' % path)
+        raise HelperError('io-error', 'cannot delete: %s' % exc)
+    return {}
+
+
+def cmd_fs_mkdir(args):
+    path = _fs_path(args.path, 'create')
+    if os.path.lexists(path):
+        raise HelperError('exists', 'already exists: %s' % path)
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        raise HelperError('io-error', 'cannot create directory: %s' % exc)
+    return {'path': path}
+
+
 # ---------------------------------------------------------------- git-status
 
 
@@ -205,6 +286,7 @@ def _unquote_git_path(s):
 def _empty_git_status(is_repo):
     return {
         'isRepo': is_repo,
+        'hasCommit': False,
         'branch': None,
         'upstream': None,
         'ahead': 0,
@@ -231,7 +313,10 @@ def cmd_git_status(args):
     modified = set()
     untracked = set()
     for line in res.stdout.splitlines():
-        if line.startswith('# branch.head '):
+        if line.startswith('# branch.oid '):
+            # "(initial)" until the first commit exists
+            out['hasCommit'] = line[len('# branch.oid '):] != '(initial)'
+        elif line.startswith('# branch.head '):
             value = line[len('# branch.head '):]
             out['branch'] = None if value == '(detached)' else value
         elif line.startswith('# branch.upstream '):
@@ -272,6 +357,84 @@ def cmd_git_status(args):
     out['modified'] = sorted(modified)
     out['untracked'] = sorted(untracked)
     return out
+
+
+# ---------------------------------------------------------------- git-init
+
+
+def _git_toplevel(path):
+    """Root of the repo containing `path`, or None if it is not inside one."""
+    res = run_git(['-C', path, 'rev-parse', '--show-toplevel'])
+    return (res.stdout.strip() or None) if res.returncode == 0 else None
+
+
+def _git_has_commit(path):
+    """False on an "unborn" HEAD — a fresh `git init` has no commit yet, and
+    `git worktree add` has nothing to branch from until it does."""
+    return run_git(['-C', path, 'rev-parse', '--verify', '--quiet', 'HEAD']).returncode == 0
+
+
+def _git_branch(path):
+    res = run_git(['-C', path, 'symbolic-ref', '--short', 'HEAD'])
+    return (res.stdout.strip() or None) if res.returncode == 0 else None
+
+
+def _git_identity_args(path):
+    """`-c` overrides for whichever identity git cannot resolve itself, so a
+    server that has one configured keeps using it."""
+    args = []
+    for key, fallback in (('user.name', 'Remote Agent'),
+                          ('user.email', 'remote-agent@localhost')):
+        if run_git(['-C', path, 'config', '--get', key]).returncode != 0:
+            args += ['-c', '%s=%s' % (key, fallback)]
+    return args
+
+
+def cmd_git_init(args):
+    """Make `path` a git repo with at least one commit, creating the directory
+    if it is missing. A directory already inside a repo is left as it is, except
+    that a repo with no commits still gets its first one."""
+    path = _fs_path(args.path, 'initialize')
+    if not os.path.exists(path):
+        try:
+            os.makedirs(path)
+        except OSError as exc:
+            raise HelperError('io-error', 'cannot create directory: %s' % exc)
+    elif not os.path.isdir(path):
+        raise HelperError('not-a-dir', 'not a directory: %s' % path)
+
+    initialized = _git_toplevel(path) is None
+    if initialized:
+        res = run_git(['-C', path, 'init', '-q'])
+        if res.returncode != 0:
+            raise HelperError('git-failed', stderr_tail(res.stderr) or 'git init failed')
+
+    committed = False
+    if not _git_has_commit(path):
+        # "-- ." keeps the pathspec inside `path`: bare `add -A` is repo-wide,
+        # which would reach outside when path is a subdirectory
+        add = run_git(['-C', path, 'add', '-A', '--', '.'])
+        if add.returncode != 0:
+            raise HelperError('git-failed', stderr_tail(add.stderr) or 'git add failed')
+        commit = run_git(
+            ['-C', path] + _git_identity_args(path) + [
+                # --allow-empty so an empty directory still gets the root commit
+                # worktrees need; gpgsign off because there is no terminal here
+                # to unlock a signing key on, and it would hang waiting
+                '-c', 'commit.gpgsign=false',
+                'commit', '-q', '--allow-empty', '-m', 'Initial commit'
+            ]
+        )
+        if commit.returncode != 0:
+            raise HelperError('git-failed', stderr_tail(commit.stderr) or 'git commit failed')
+        committed = True
+
+    return {
+        'path': path,
+        'initialized': initialized,
+        'committed': committed,
+        'branch': _git_branch(path)
+    }
 
 
 # ---------------------------------------------------------------- sessions
@@ -551,7 +714,25 @@ def build_parser():
     p.add_argument('--path', required=True)
     p.add_argument('--hidden', action='store_true')
 
+    p = add('ls-trees', cmd_ls_trees)
+    p.add_argument('--path', required=True, action='append')
+    p.add_argument('--hidden', action='store_true')
+
     p = add('git-status', cmd_git_status)
+    p.add_argument('--path', required=True)
+
+    p = add('git-init', cmd_git_init)
+    p.add_argument('--path', required=True)
+
+    p = add('fs-move', cmd_fs_move)
+    p.add_argument('--src', required=True)
+    p.add_argument('--dest', required=True)
+
+    p = add('fs-delete', cmd_fs_delete)
+    p.add_argument('--path', required=True)
+    p.add_argument('--recursive', action='store_true')
+
+    p = add('fs-mkdir', cmd_fs_mkdir)
     p.add_argument('--path', required=True)
 
     add('session-list', cmd_session_list)

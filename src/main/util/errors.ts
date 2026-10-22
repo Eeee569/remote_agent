@@ -3,7 +3,8 @@
  * over IPC as { name, message, code }.
  *
  * Codes in use: not-connected, auth-failed, hostkey-mismatch, conn-failed,
- * timeout, sftp-failed, not-found, encryption-unavailable.
+ * channel-limit, timeout, sftp-failed, not-found, encryption-unavailable,
+ * too-large.
  */
 export class CodedError extends Error {
   constructor(

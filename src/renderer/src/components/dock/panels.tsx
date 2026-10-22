@@ -5,13 +5,14 @@
  */
 import type { IDockviewPanelProps } from 'dockview'
 import TerminalPanel from '@/components/terminal/TerminalPanel'
+import ShellPanel from '@/components/terminal/ShellPanel'
 import FileTreePanel from '@/components/files/FileTreePanel'
 import FileViewerPanel from '@/components/files/FileViewerPanel'
 import SettingsPanel from '@/components/settings/SettingsPanel'
 import InstallPanel from '@/components/settings/InstallPanel'
 import PlaceholderPanel from '@/components/dock/PlaceholderPanel'
 
-/** Params carried by every per-session panel (terminal / tree / viewer). */
+/** Params carried by every per-session panel (terminal / shell / tree / viewer). */
 export interface SessionPanelParams {
   sessionId: string
   hostId: string
@@ -26,6 +27,7 @@ export interface PlaceholderPanelParams {
 
 export const panelComponents: Record<string, React.FunctionComponent<IDockviewPanelProps>> = {
   terminal: TerminalPanel,
+  shell: ShellPanel,
   tree: FileTreePanel,
   viewer: FileViewerPanel,
   settings: SettingsPanel,

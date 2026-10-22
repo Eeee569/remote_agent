@@ -1,5 +1,6 @@
 import type { IDockviewPanelProps } from 'dockview'
 import type { SessionPanelParams } from '@/components/dock/panels'
+import { sessionFrameStyle } from '@/components/dock/session-layout'
 import { useProjectsStore } from '@/stores/projects'
 import FileTree from '@/components/files/FileTree'
 
@@ -26,7 +27,11 @@ const FileTreePanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (props)
     )
   }
 
-  return <FileTree hostId={hostId} rootPath={session.cwd} sessionId={sessionId} />
+  return (
+    <div style={{ height: '100%', ...sessionFrameStyle(sessionId) }}>
+      <FileTree hostId={hostId} rootPath={session.cwd} sessionId={sessionId} />
+    </div>
+  )
 }
 
 export default FileTreePanel

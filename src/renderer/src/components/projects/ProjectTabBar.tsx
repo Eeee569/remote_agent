@@ -12,6 +12,7 @@ export default function ProjectTabBar(): React.JSX.Element | null {
   const loadSessions = useProjectsStore((s) => s.loadSessions)
   const removeProject = useProjectsStore((s) => s.removeProject)
   const openAddProject = useUiStore((s) => s.openAddProject)
+  const closeGlobalGrid = useUiStore((s) => s.closeGlobalGrid)
 
   if (!activeHostId) return null
 
@@ -47,6 +48,7 @@ export default function ProjectTabBar(): React.JSX.Element | null {
             <div
               key={p.id}
               onClick={() => {
+                closeGlobalGrid()
                 setActiveProject(p.id)
                 void loadSessions(activeHostId, p.id)
               }}
@@ -94,7 +96,10 @@ export default function ProjectTabBar(): React.JSX.Element | null {
         </div>
       </div>
       <div
-        onClick={() => setActiveProject(SETTINGS_ID)}
+        onClick={() => {
+          closeGlobalGrid()
+          setActiveProject(SETTINGS_ID)
+        }}
         title='Settings'
         style={{
           ...tabBase,

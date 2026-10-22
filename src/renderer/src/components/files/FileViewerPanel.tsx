@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { IDockviewPanelProps } from 'dockview'
 import type { SessionPanelParams } from '@/components/dock/panels'
+import { sessionFrameStyle } from '@/components/dock/session-layout'
 import { useFilesStore } from '@/stores/files'
 import MonacoFileView, { disposeFileModel } from '@/components/files/MonacoFileView'
+import PdfFileView from '@/components/files/PdfFileView'
+import { isPdfPath } from '@/components/files/pdf'
 
 const EMPTY: string[] = []
 
@@ -46,10 +49,9 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
     setDirtyByPath((d) => (d[path] === dirty ? d : { ...d, [path]: dirty }))
   }
 
+  // no "discard changes?" prompt: the editor flushes pending edits to the
+  // server as it unmounts, so closing a tab never loses work
   const close = (path: string): void => {
-    if (dirtyByPath[path] && !window.confirm(`Discard unsaved changes in ${basename(path)}?`)) {
-      return
-    }
     closeFile(sessionId, path)
   }
 
@@ -64,7 +66,8 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
           color: 'var(--ra-text-dim)',
           fontSize: 12.5,
           padding: 16,
-          textAlign: 'center'
+          textAlign: 'center',
+          ...sessionFrameStyle(sessionId)
         }}
       >
         Click a file in the tree to open it here.
@@ -73,7 +76,14 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
   }
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div
+      style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        ...sessionFrameStyle(sessionId)
+      }}
+    >
       <div
         style={{
           flexShrink: 0,
@@ -142,7 +152,9 @@ const FileViewerPanel: React.FC<IDockviewPanelProps<SessionPanelParams>> = (prop
         })}
       </div>
       <div style={{ flex: 1, minHeight: 0 }}>
-        {active ? (
+        {active && isPdfPath(active) ? (
+          <PdfFileView key={`${hostId}:${active}`} hostId={hostId} path={active} />
+        ) : active ? (
           <MonacoFileView
             key={`${hostId}:${active}`}
             hostId={hostId}

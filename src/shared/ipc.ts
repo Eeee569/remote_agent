@@ -12,7 +12,9 @@ import type {
   ConnEvent,
   ConnStatus,
   FileDiff,
+  ClipboardPaste,
   FileReadResult,
+  FileStat,
   GitStatus,
   HostPublic,
   HostSaveInput,
@@ -28,6 +30,7 @@ import type {
   TermExitEvent,
   TermOpenInput,
   TreeEntry,
+  TreeListing,
   Worktree,
   CodexWizardOptions
 } from './domain'
@@ -58,10 +61,22 @@ export const CH = {
   evtTermData: 'evt:term:data',
   evtTermExit: 'evt:term:exit',
 
+  clipboardWrite: 'clipboard:write', // send-only
+  clipboardRead: 'clipboard:read',
+  clipboardPaste: 'clipboard:paste',
+
+  fsUploadPaths: 'fs:uploadPaths',
+  fsUploadClipboard: 'fs:uploadClipboard',
+
   fsLsTree: 'fs:lsTree',
+  fsLsTrees: 'fs:lsTrees',
   fsRead: 'fs:read',
   fsWrite: 'fs:write',
   fsHome: 'fs:home',
+  fsStat: 'fs:stat',
+  fsMove: 'fs:move',
+  fsDelete: 'fs:delete',
+  fsMkdir: 'fs:mkdir',
   gitStatus: 'git:status',
 
   projectList: 'project:list',
@@ -134,6 +149,29 @@ export const termResizeSchema = z.object({
   rows: z.number().int().positive()
 })
 
+/**
+ * Cap matches the renderer's OSC 52 limit: the host can ask to set this
+ * clipboard, so the payload is bounded on the way in.
+ */
+export const clipboardWriteSchema = z.object({
+  text: z.string().max(1024 * 1024)
+})
+
+/** null `remoteDir`: stage under ~/.remote-agent/uploads, for handing to an agent */
+export const fsUploadPathsSchema = z.object({
+  hostId: z.string().min(1),
+  paths: z
+    .array(z.string().min(1).refine((p) => p.startsWith('/'), 'must be an absolute local path'))
+    .min(1)
+    .max(1000),
+  remoteDir: z.string().min(1).nullable()
+})
+
+export const fsUploadClipboardSchema = z.object({
+  hostId: z.string().min(1),
+  remoteDir: z.string().min(1).nullable()
+})
+
 export const fsPathSchema = z.object({
   hostId: z.string().min(1),
   path: z.string().min(1)
@@ -146,6 +184,21 @@ export const fsReadSchema = fsPathSchema.extend({
 export const fsWriteSchema = fsPathSchema.extend({
   data: z.instanceof(Uint8Array),
   mode: z.number().int().optional()
+})
+
+export const fsLsTreesSchema = z.object({
+  hostId: z.string().min(1),
+  paths: z.array(z.string().min(1)).max(200)
+})
+
+export const fsMoveSchema = z.object({
+  hostId: z.string().min(1),
+  src: z.string().min(1),
+  dest: z.string().min(1)
+})
+
+export const fsDeleteSchema = fsPathSchema.extend({
+  recursive: z.boolean().optional()
 })
 
 export const settingsTargetSchema = z.object({
@@ -189,6 +242,9 @@ export const layoutWriteSchema = z.object({
   layout: z.object({
     dockview: z.unknown(),
     openFilesBySession: z.record(z.string(), z.array(z.string())),
+    closedPanels: z.array(z.string()).optional(),
+    sessionLayoutMode: z.enum(['focus', 'columns', 'rows', 'grid']).optional(),
+    focusedSessionId: z.string().nullable().optional(),
     schemaVersion: z.number()
   })
 })
@@ -228,11 +284,37 @@ export interface RendererApi {
   onTermData(cb: (e: TermDataEvent) => void): () => void
   onTermExit(cb: (e: TermExitEvent) => void): () => void
 
+  // clipboard — the OS clipboard via the main process, which works regardless of
+  // document focus and needs no navigator.clipboard permission
+  clipboardWrite(text: string): void
+  clipboardRead(): Promise<string>
+  /**
+   * Terminal paste: text as is, or copied files/images uploaded to a staging
+   * dir on the host and returned as their host paths.
+   */
+  clipboardPaste(hostId: string): Promise<ClipboardPaste>
+
+  // local -> host uploads (null `remoteDir` = staging dir); resolve with the
+  // host path of each top-level item
+  /** `files` must be File objects from a real drop; their paths are read in the preload */
+  fsUploadFiles(hostId: string, files: File[], remoteDir: string | null): Promise<string[]>
+  /** copied files or image; null when the clipboard holds neither */
+  fsUploadClipboard(hostId: string, remoteDir: string | null): Promise<string[] | null>
+
   // files / git
   fsLsTree(hostId: string, path: string): Promise<TreeEntry[]>
+  /** one round trip for several directories; each result may carry an error */
+  fsLsTrees(hostId: string, paths: string[]): Promise<TreeListing[]>
   fsRead(hostId: string, path: string, maxBytes?: number): Promise<FileReadResult>
-  fsWrite(hostId: string, path: string, data: Uint8Array, mode?: number): Promise<void>
+  /** atomic replace; resolves with the file's stat after the write */
+  fsWrite(hostId: string, path: string, data: Uint8Array, mode?: number): Promise<FileStat>
+  /** null when the path does not exist */
+  fsStat(hostId: string, path: string): Promise<FileStat | null>
   fsHome(hostId: string): Promise<string>
+  /** move or rename; rejects when `dest` already exists. Returns the new path. */
+  fsMove(hostId: string, src: string, dest: string): Promise<string>
+  fsDelete(hostId: string, path: string, recursive?: boolean): Promise<void>
+  fsMkdir(hostId: string, path: string): Promise<string>
   gitStatus(hostId: string, repoPath: string): Promise<GitStatus>
 
   // projects

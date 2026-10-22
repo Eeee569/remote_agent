@@ -30,6 +30,12 @@ interface UiState {
   newSessionOpen: boolean
   openNewSession(): void
   closeNewSession(): void
+
+  /** cross-project overview: every running session on the host in one grid */
+  globalGridOpen: boolean
+  openGlobalGrid(): void
+  closeGlobalGrid(): void
+  toggleGlobalGrid(): void
 }
 
 export const useUiStore = create<UiState>()((set, get) => ({
@@ -56,5 +62,10 @@ export const useUiStore = create<UiState>()((set, get) => ({
 
   newSessionOpen: false,
   openNewSession: () => set({ newSessionOpen: true }),
-  closeNewSession: () => set({ newSessionOpen: false })
+  closeNewSession: () => set({ newSessionOpen: false }),
+
+  globalGridOpen: false,
+  openGlobalGrid: () => set({ globalGridOpen: true }),
+  closeGlobalGrid: () => set({ globalGridOpen: false }),
+  toggleGlobalGrid: () => set((s) => ({ globalGridOpen: !s.globalGridOpen }))
 }))

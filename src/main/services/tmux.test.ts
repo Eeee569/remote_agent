@@ -49,6 +49,22 @@ describe('buildAttachCommand', () => {
     expect(cmd).not.toContain('\n')
   })
 
+  it('turns on clipboard forwarding before attaching', () => {
+    const cmd = buildAttachCommand('ra-demo')
+    // a server started before these options existed keeps its old settings, so
+    // every attach re-applies them
+    expect(cmd).toContain('set-option -gq set-clipboard on')
+    expect(cmd).toContain('set-option -gq allow-passthrough on')
+    expect(cmd.indexOf('set-clipboard')).toBeLessThan(cmd.indexOf('new-session'))
+  })
+
+  it('separates the chained tmux commands with a bare semicolon', () => {
+    // `\;` survives the shell as a `;` argument for tmux itself; an unescaped
+    // one would end the command line and drop the attach
+    const words = shellWords(buildAttachCommand('ra-demo').replace(/^exec /, ''))
+    expect(words.filter((w) => w === ';')).toHaveLength(2)
+  })
+
   it('passes the working directory when given', () => {
     expect(buildAttachCommand('ra-demo', '/srv/app')).toContain('-c /srv/app')
   })
