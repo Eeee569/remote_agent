@@ -1,0 +1,15 @@
+# Throwaway SSH host for testing the phone UI: sshd + what the app needs on a
+# server (tmux, git, python3). User "dev", password "devpass". Never expose it.
+FROM ubuntu:24.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server tmux git python3 ca-certificates locales \
+ && rm -rf /var/lib/apt/lists/* \
+ && locale-gen en_US.UTF-8 \
+ && mkdir -p /run/sshd \
+ && useradd -m -s /bin/bash dev \
+ && echo 'dev:devpass' | chpasswd \
+ && su dev -c "git config --global user.email dev@example.invalid && git config --global user.name Dev"
+ENV LANG=en_US.UTF-8
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

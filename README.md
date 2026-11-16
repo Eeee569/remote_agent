@@ -22,6 +22,13 @@ The GUI is only a viewer/controller: agents run in tmux on the server, and all p
 - **Codex as a sub-agent of Claude Code** — a one-click wizard (with diff preview) registers Codex CLI as an MCP server (`codex mcp-server`) and writes a `codex-worker` agent definition, so Claude Code orchestrates and delegates implementation work to Codex.
 - **Server bootstrap** — on first connect the app uploads a single-file python3 helper (`~/.remote-agent/bin/helper`), and can install Claude Code / Codex CLI for you (with consent).
 
+## iPhone app
+
+`ios/` holds a phone client for the same hosts and the same server-side state: hosts,
+projects and sessions, a terminal attached to each session's tmux (with a key bar for
+esc/tab/ctrl/arrows and drag-to-scroll), and a file browser with a simple text editor. It installs from
+Xcode with a free Apple ID — see [ios/README.md](ios/README.md).
+
 ## Server requirements
 
 `sshd`, `tmux`, `git`, `python3` (stdlib only — no packages). Claude Code / Codex CLI are optional and installable from the app's Install panel.
@@ -39,6 +46,7 @@ npm run dev          # launch Electron with HMR (Linux/mac)
 npm run typecheck    # strict TS across main/preload/renderer
 npm run test:helper  # python unittest suite for the server helper
 npm run build        # production bundles into out/
+npm run build:ios-web  # rebuild the iPhone app's bundled page (ios/RemoteAgent/web)
 ```
 
 ## Verification scripts

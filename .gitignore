@@ -6,3 +6,10 @@ release/
 .DS_Store
 *.local
 .env
+
+# iPhone app: generated on the Mac by ios/setup.sh, and SwiftPM build output
+ios/RemoteAgent.xcodeproj/
+ios/RemoteAgent/Info.plist
+ios/.tools/
+ios/RemoteAgentCore/.build/
+ios/RemoteAgentCore/.swiftpm/

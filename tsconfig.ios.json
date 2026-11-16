@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.web.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": ["ios/web/src/**/*.ts", "ios/web/src/**/*.tsx", "src/renderer/src/env.d.ts"]
+}

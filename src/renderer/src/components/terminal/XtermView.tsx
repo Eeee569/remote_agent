@@ -133,13 +133,14 @@ export default function XtermView({
           // fit is best-effort before the first layout pass
         }
       }
+      const sent = { cols: term.cols, rows: term.rows }
       const { termId } = await api.termOpen({
         hostId,
         tmuxName,
         cwd,
         command,
-        cols: term.cols,
-        rows: term.rows
+        cols: sent.cols,
+        rows: sent.rows
       })
       if (!termRef.current) {
         // unmounted while opening — close the orphaned channel
@@ -147,6 +148,24 @@ export default function XtermView({
         return
       }
       termIdRef.current = termId
+      /*
+       * The panel usually reaches its final size while the channel is still
+       * opening (dockview lays a freshly added session out after it mounts).
+       * The resize observer fits xterm to that size, but with no channel id
+       * yet it has nowhere to send it — so the PTY would keep the size from
+       * mount time and tmux would draw for the wrong grid until the next
+       * window resize. Reconcile now that the channel exists.
+       */
+      if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+        try {
+          fitRef.current?.fit()
+        } catch {
+          // keep whatever size xterm already has
+        }
+      }
+      if (term.cols !== sent.cols || term.rows !== sent.rows) {
+        api.termResize(termId, term.cols, term.rows)
+      }
     } catch (err) {
       setExit({ reason: 'error', message: err instanceof Error ? err.message : String(err) })
     } finally {
