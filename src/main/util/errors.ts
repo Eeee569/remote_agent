@@ -4,7 +4,7 @@
  *
  * Codes in use: not-connected, auth-failed, hostkey-mismatch, conn-failed,
  * channel-limit, timeout, sftp-failed, not-found, encryption-unavailable,
- * too-large.
+ * too-large, unsupported.
  */
 export class CodedError extends Error {
   constructor(

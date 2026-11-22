@@ -24,6 +24,7 @@ import {
   bootstrapInstallSchema,
   clipboardWriteSchema,
   codexWizardOptionsSchema,
+  fsCopyToLocalSchema,
   fsPathSchema,
   fsReadSchema,
   fsUploadClipboardSchema,
@@ -53,7 +54,12 @@ import { getHelperClient } from '../services/helper-client'
 import * as settingsSvc from '../services/settings'
 import * as state from '../services/state'
 import { buildAttachCommand } from '../services/tmux'
-import { clipboardPasteForTerminal, uploadClipboard } from '../services/clipboard-files'
+import {
+  clipboardPasteForTerminal,
+  copyRemoteToClipboard,
+  uploadClipboard
+} from '../services/clipboard-files'
+import { dragOutData } from '../services/download'
 import { uploadLocalPaths } from '../services/upload'
 import { CodedError } from '../util/errors'
 
@@ -294,6 +300,14 @@ export function registerIpc(): void {
   handle(CH.fsUploadClipboard, fsUploadClipboardSchema, ({ hostId, remoteDir }) =>
     uploadClipboard(hostId, remoteDir)
   )
+  handle(CH.fsCopyToLocal, fsCopyToLocalSchema, ({ hostId, paths }) =>
+    copyRemoteToClipboard(hostId, paths)
+  )
+  ipcMain.on(CH.fsDragOutData, (e, payload: unknown) => {
+    const r = fsPathSchema.safeParse(payload)
+    // a drag without the link is still a drag: it just cannot leave the window
+    e.returnValue = r.success ? dragOutData(r.data.hostId, r.data.path) : null
+  })
 
   handle(CH.gitStatus, fsPathSchema, ({ hostId, path }) => getHelperClient(hostId).gitStatus(path))
 

@@ -5,6 +5,7 @@
  */
 import type { SFTPWrapper } from 'ssh2'
 import { randomBytes } from 'crypto'
+import { rename as renameLocal, rm } from 'fs/promises'
 import { getConnectionManager } from './connection-manager'
 import { CodedError } from '../util/errors'
 
@@ -18,6 +19,23 @@ const TMP_MODE = 0o600
 
 const S_IFMT = 0o170000
 const S_IFDIR = 0o040000
+const S_IFREG = 0o100000
+const S_IFLNK = 0o120000
+
+export type RemoteEntryKind = 'file' | 'dir' | 'symlink' | 'other'
+
+function kindOf(mode: number): RemoteEntryKind {
+  switch (mode & S_IFMT) {
+    case S_IFREG:
+      return 'file'
+    case S_IFDIR:
+      return 'dir'
+    case S_IFLNK:
+      return 'symlink'
+    default:
+      return 'other'
+  }
+}
 
 // SFTP status codes (SSH_FXP_STATUS)
 const SFX_EOF = 1
@@ -152,7 +170,7 @@ function sfStat(
 function sfReaddir(
   sftp: SFTPWrapper,
   path: string
-): Promise<Array<{ filename: string; attrs: { mode: number } }>> {
+): Promise<Array<{ filename: string; attrs: { mode: number; size: number } }>> {
   return new Promise((resolve, reject) => {
     sftp.readdir(path, (err, list) => (err ? reject(err) : resolve(list)))
   })
@@ -289,12 +307,49 @@ export class SftpService {
     )
   }
 
-  async stat(path: string): Promise<{ isDir: boolean; size: number; mtimeMs: number } | null> {
+  /**
+   * Copy a remote file to `localPath`, with several reads in flight. Lands
+   * under a temp name first, so a dropped link never leaves a truncated file
+   * at the real path.
+   */
+  async downloadFile(remotePath: string, localPath: string, size: number): Promise<void> {
+    return this.run(
+      'downloadFile',
+      async (sftp) => {
+        const abs = await this.expand(sftp, remotePath)
+        const part = localPath + '.ra-part-' + randomBytes(4).toString('hex')
+        try {
+          await new Promise<void>((resolve, reject) => {
+            sftp.fastGet(abs, part, { concurrency: 16, chunkSize: IO_CHUNK }, (err) =>
+              err ? reject(err) : resolve()
+            )
+          })
+          await renameLocal(part, localPath)
+        } catch (err) {
+          await rm(part, { force: true }).catch(() => undefined)
+          if (isNoSuchFile(err)) throw new CodedError('not-found', `no such file: ${abs}`)
+          throw err
+        }
+      },
+      transferTimeoutMs(size)
+    )
+  }
+
+  /** Follows symlinks; null when nothing is there. */
+  async stat(
+    path: string
+  ): Promise<{ isDir: boolean; isFile: boolean; size: number; mode: number; mtimeMs: number } | null> {
     return this.run('stat', async (sftp) => {
       const abs = await this.expand(sftp, path)
       try {
         const st = await sfStat(sftp, abs)
-        return { isDir: (st.mode & S_IFMT) === S_IFDIR, size: st.size, mtimeMs: st.mtime * 1000 }
+        return {
+          isDir: (st.mode & S_IFMT) === S_IFDIR,
+          isFile: (st.mode & S_IFMT) === S_IFREG,
+          size: st.size,
+          mode: st.mode,
+          mtimeMs: st.mtime * 1000
+        }
       } catch (err) {
         if (isNoSuchFile(err)) return null
         throw err
@@ -302,10 +357,13 @@ export class SftpService {
     })
   }
 
-  async readdir(path: string): Promise<Array<{ name: string; isDir: boolean }>> {
+  /** Entries are not followed: a symlink reports as 'symlink', whatever it points at. */
+  async readdir(
+    path: string
+  ): Promise<Array<{ name: string; isDir: boolean; kind: RemoteEntryKind; size: number; mode: number }>> {
     return this.run('readdir', async (sftp) => {
       const abs = await this.expand(sftp, path)
-      let list: Array<{ filename: string; attrs: { mode: number } }>
+      let list: Array<{ filename: string; attrs: { mode: number; size: number } }>
       try {
         list = await sfReaddir(sftp, abs)
       } catch (err) {
@@ -314,7 +372,10 @@ export class SftpService {
       }
       return list.map((e) => ({
         name: e.filename,
-        isDir: (e.attrs.mode & S_IFMT) === S_IFDIR
+        isDir: (e.attrs.mode & S_IFMT) === S_IFDIR,
+        kind: kindOf(e.attrs.mode),
+        size: e.attrs.size,
+        mode: e.attrs.mode
       }))
     })
   }

@@ -576,6 +576,31 @@ export default function FileTree({
     [hostId, targetDir, uploadInto]
   )
 
+  // ---------------- downloads to this computer ----------------
+
+  /** Download a host file/folder and put it on the clipboard for Finder. */
+  const copyToComputer = useCallback(
+    (path: string): void => {
+      const name = basenameOf(path) || path
+      void (async () => {
+        const slow = window.setTimeout(() => addToast('info', `Copying ${name}…`), 600)
+        try {
+          const n = await api.fsCopyToLocal(hostId, [path])
+          if (n === 0) {
+            addToast('info', `${name} is not a regular file or folder`)
+            return
+          }
+          addToast('success', `Copied ${name} — paste it in Finder with ${isMac ? '⌘V' : 'Ctrl+V'}`)
+        } catch (err) {
+          addToast('error', `Copy failed: ${errText(err)}`)
+        } finally {
+          window.clearTimeout(slow)
+        }
+      })()
+    },
+    [addToast, hostId]
+  )
+
   const copyPath = useCallback(
     (path: string): void => {
       void navigator.clipboard
@@ -621,6 +646,13 @@ export default function FileTree({
         onClick: () => pasteFromClipboard(entry)
       })
       if (entry !== null) {
+        items.push({
+          kind: 'item',
+          icon: '⇡',
+          label: `Copy to computer${isMac ? '  ⌘C' : '  Ctrl+C'}`,
+          title: 'Download to this computer, then paste in Finder',
+          onClick: () => copyToComputer(entry.path)
+        })
         items.push({ kind: 'separator' })
         items.push({
           kind: 'item',
@@ -663,6 +695,7 @@ export default function FileTree({
     },
     [
       copyPath,
+      copyToComputer,
       createFile,
       createFolder,
       deleteEntry,
@@ -748,8 +781,11 @@ export default function FileTree({
                 draggable
                 onDragStart={(e) => {
                   draggingRef.current = entry
-                  e.dataTransfer.effectAllowed = 'move'
                   e.dataTransfer.setData('text/plain', entry.path)
+                  // moves inside the tree, or a copy when dropped in Finder
+                  const out = dir ? null : api.fsDragOutData(hostId, entry.path)
+                  if (out !== null) e.dataTransfer.setData('DownloadURL', out)
+                  e.dataTransfer.effectAllowed = out !== null ? 'copyMove' : 'move'
                 }}
                 onDragEnd={() => {
                   draggingRef.current = null
@@ -967,11 +1003,18 @@ export default function FileTree({
         }}
         tabIndex={0}
         onKeyDown={(e) => {
-          // ⌘V (Ctrl+V) with the tree focused uploads what was copied locally
+          // with the tree focused, ⌘C copies the selected entry to this
+          // computer and ⌘V uploads what was copied here (Ctrl elsewhere)
           const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
-          if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'v') return
-          e.preventDefault()
-          pasteFromClipboard(entryAt(selected))
+          if (!mod || e.altKey || e.shiftKey) return
+          const key = e.key.toLowerCase()
+          if (key === 'v') {
+            e.preventDefault()
+            pasteFromClipboard(entryAt(selected))
+          } else if (key === 'c' && selected !== null && selected !== rootPath) {
+            e.preventDefault()
+            copyToComputer(selected)
+          }
         }}
         onDragOver={(e) => {
           const external = !draggingRef.current

@@ -35,10 +35,10 @@ interface PlanItem {
 
 const DIR_MODE = 0o755
 
-function tooBig(what: string): CodedError {
+export function tooBig(what: string): CodedError {
   return new CodedError(
     'too-large',
-    `${what} — uploads are limited to ${UPLOAD_MAX_FILES} files and ${UPLOAD_MAX_BYTES / 1024 ** 3} GiB at a time`
+    `${what} — one upload or copy is limited to ${UPLOAD_MAX_FILES} files and ${UPLOAD_MAX_BYTES / 1024 ** 3} GiB`
   )
 }
 

@@ -1,5 +1,6 @@
 /**
- * Files and images on the local clipboard, uploaded to the host on paste.
+ * Files and images on the local clipboard, uploaded to the host on paste —
+ * and host files copied in the tree, put on the clipboard for Finder.
  *
  * Electron's clipboard.read() only looks at the first pasteboard item, and a
  * Finder copy of several files puts one item per file — so on macOS the full
@@ -7,7 +8,10 @@
  */
 import { execFile } from 'child_process'
 import { clipboard } from 'electron'
+import { pathToFileURL } from 'url'
 import type { ClipboardPaste } from '../../shared/domain'
+import { CodedError } from '../util/errors'
+import { downloadRemotePaths } from './download'
 import { uploadBytes, uploadLocalPaths } from './upload'
 import { fileUrlToPath, parseUriList, pastedImageName } from './upload-util'
 
@@ -59,6 +63,52 @@ export async function readClipboardFilePaths(): Promise<string[]> {
   const gnome = clipboard.read('x-special/gnome-copied-files')
   if (gnome !== '') return parseUriList(gnome.split('\n').slice(1).join('\n'))
   return []
+}
+
+/** One pasteboard item per file, as Finder writes them; paths arrive as argv. */
+const JXA_WRITE_FILE_URLS = `
+function run(argv) {
+  ObjC.import("AppKit");
+  const pb = $.NSPasteboard.generalPasteboard;
+  pb.clearContents;
+  const items = $.NSMutableArray.array;
+  for (const p of argv) {
+    const item = $.NSPasteboardItem.alloc.init;
+    item.setStringForType($.NSURL.fileURLWithPath(p).absoluteString, "public.file-url");
+    items.addObject(item);
+  }
+  pb.writeObjects(items);
+  return String(pb.pasteboardItems.count);
+}
+`
+
+/** Put local files on the clipboard so ⌘V in Finder (or a file manager) copies them. */
+export async function writeClipboardFilePaths(paths: string[]): Promise<void> {
+  if (process.platform === 'darwin') {
+    const written = await new Promise<string>((resolve, reject) => {
+      execFile(
+        'osascript',
+        ['-l', 'JavaScript', '-e', JXA_WRITE_FILE_URLS, ...paths],
+        { timeout: 5000 },
+        (err, stdout) => (err ? reject(err) : resolve(stdout.trim()))
+      )
+    })
+    if (written !== String(paths.length)) throw new Error('could not put the files on the clipboard')
+    return
+  }
+  if (process.platform === 'linux') {
+    const uris = paths.map((p) => pathToFileURL(p).href)
+    clipboard.writeBuffer('text/uri-list', Buffer.from(uris.join('\r\n') + '\r\n'))
+    return
+  }
+  throw new CodedError('unsupported', 'Copying files to the clipboard is not supported on this OS')
+}
+
+/** Download host files/folders and put them on the clipboard; resolves with how many. */
+export async function copyRemoteToClipboard(hostId: string, remotePaths: string[]): Promise<number> {
+  const local = await downloadRemotePaths(hostId, remotePaths)
+  if (local.length > 0) await writeClipboardFilePaths(local)
+  return local.length
 }
 
 function clipboardPng(): Buffer | null {

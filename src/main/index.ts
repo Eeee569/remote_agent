@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpc } from './ipc/register'
+import { pruneLocalStaging, startDragServer } from './services/download'
 import { shutdownAllConnections } from './ssh/connection-manager'
 
 const isDev = !!process.env['ELECTRON_RENDERER_URL']
@@ -89,6 +90,8 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   registerIpc()
+  startDragServer()
+  void pruneLocalStaging()
   createWindow()
 
   app.on('activate', () => {

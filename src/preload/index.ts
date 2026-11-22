@@ -52,6 +52,8 @@ const api: RendererApi = {
   },
   fsUploadClipboard: (hostId, remoteDir) =>
     ipcRenderer.invoke(CH.fsUploadClipboard, { hostId, remoteDir }),
+  fsCopyToLocal: (hostId, paths) => ipcRenderer.invoke(CH.fsCopyToLocal, { hostId, paths }),
+  fsDragOutData: (hostId, path) => ipcRenderer.sendSync(CH.fsDragOutData, { hostId, path }),
 
   fsLsTree: (hostId, path) => ipcRenderer.invoke(CH.fsLsTree, { hostId, path }),
   fsLsTrees: (hostId, paths) => ipcRenderer.invoke(CH.fsLsTrees, { hostId, paths }),

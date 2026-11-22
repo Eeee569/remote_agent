@@ -67,6 +67,8 @@ export const CH = {
 
   fsUploadPaths: 'fs:uploadPaths',
   fsUploadClipboard: 'fs:uploadClipboard',
+  fsCopyToLocal: 'fs:copyToLocal',
+  fsDragOutData: 'fs:dragOutData', // sendSync: dragstart cannot await
 
   fsLsTree: 'fs:lsTree',
   fsLsTrees: 'fs:lsTrees',
@@ -170,6 +172,11 @@ export const fsUploadPathsSchema = z.object({
 export const fsUploadClipboardSchema = z.object({
   hostId: z.string().min(1),
   remoteDir: z.string().min(1).nullable()
+})
+
+export const fsCopyToLocalSchema = z.object({
+  hostId: z.string().min(1),
+  paths: z.array(z.string().min(1)).min(1).max(1000)
 })
 
 export const fsPathSchema = z.object({
@@ -300,6 +307,16 @@ export interface RendererApi {
   fsUploadFiles(hostId: string, files: File[], remoteDir: string | null): Promise<string[]>
   /** copied files or image; null when the clipboard holds neither */
   fsUploadClipboard(hostId: string, remoteDir: string | null): Promise<string[] | null>
+
+  // host -> this computer
+  /** download files/folders and put them on the clipboard for Finder; resolves with the count */
+  fsCopyToLocal(hostId: string, paths: string[]): Promise<number>
+  /**
+   * `DownloadURL` drag data for a host file (synchronous, for dragstart), or
+   * null when drag-out is unavailable. The file is fetched only if the drag
+   * is dropped in Finder.
+   */
+  fsDragOutData(hostId: string, path: string): string | null
 
   // files / git
   fsLsTree(hostId: string, path: string): Promise<TreeEntry[]>
