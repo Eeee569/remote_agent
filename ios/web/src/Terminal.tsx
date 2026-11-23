@@ -51,6 +51,13 @@ export interface TerminalHandle {
   blur(): void
   /** Arm Ctrl for the next typed character. */
   setCtrl(armed: boolean): void
+  /**
+   * Hand over text written in the compose box: pasted in one piece, then
+   * Enter. Empty text is just Enter.
+   */
+  submit(text: string): void
+  /** Scroll the history one screen: -1 is back (older), 1 is forward. */
+  page(direction: -1 | 1): void
 }
 
 interface TerminalViewProps {
@@ -60,13 +67,19 @@ interface TerminalViewProps {
   cwd: string
   fontSize: number
   visible: boolean
+  /**
+   * true: the on-screen keyboard types straight into the terminal.
+   * false: input comes from the compose box, and touching the terminal never
+   * raises the keyboard.
+   */
+  direct: boolean
   onCtrlUsed: () => void
 }
 
 const encoder = new TextEncoder()
 
 const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView(
-  { connId, tmuxName, cwd, fontSize, visible, onCtrlUsed },
+  { connId, tmuxName, cwd, fontSize, visible, direct, onCtrlUsed },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -74,6 +87,9 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function Term
   const fitRef = useRef<FitAddon | null>(null)
   const termIdRef = useRef<string | null>(null)
   const ctrlRef = useRef(false)
+  const scrollRef = useRef<(lines: number, x?: number, y?: number) => void>(() => undefined)
+  const directRef = useRef(direct)
+  directRef.current = direct
   const onCtrlUsedRef = useRef(onCtrlUsed)
   onCtrlUsedRef.current = onCtrlUsed
   const [ended, setEnded] = useState<string | null>(null)
@@ -120,6 +136,23 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function Term
     blur: () => termRef.current?.blur(),
     setCtrl: (armed) => {
       ctrlRef.current = armed
+    },
+    submit: (text) => {
+      const term = termRef.current
+      if (!term) return
+      if (text === '') {
+        writeRef.current('\r')
+        return
+      }
+      // xterm wraps this in a bracketed paste when the program asked for one,
+      // so line breaks inside the text do not submit it early
+      term.paste(text)
+      // a program reading a paste treats an Enter glued to its end as part of it
+      window.setTimeout(() => writeRef.current('\r'), 80)
+    },
+    page: (direction) => {
+      const rows = termRef.current?.rows ?? 24
+      scrollRef.current(-direction * Math.max(rows - 2, 1))
     }
   }))
 
@@ -188,52 +221,136 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function Term
      * events tmux expects, which scrolls its history; with no mouse mode the
      * drag scrolls xterm's own buffer.
      */
-    let lastY: number | null = null
-    let carry = 0
-    let moved = false
     const cellHeight = (): number => Math.max(el.clientHeight / Math.max(term.rows, 1), 8)
+    /** Lines one wheel notch moves in the programs this is used with (tmux: 5). */
+    const LINES_PER_NOTCH = 5
+    let notchDebt = 0
     /**
-     * Programs move several lines per wheel notch (tmux: 5, less/vim: 3), so one
-     * notch per line of finger travel would fly. One per three lines tracks the
-     * finger closely without feeling sluggish.
+     * Scroll the history by `lines` (positive: towards older output). x/y say
+     * where on the terminal the finger is, for the mouse report.
      */
-    const LINES_PER_NOTCH = 3
+    const scrollBy = (lines: number, x?: number, y?: number): void => {
+      if (term.modes.mouseTrackingMode === 'none') {
+        notchDebt += lines
+        const whole = Math.trunc(notchDebt)
+        notchDebt -= whole
+        if (whole !== 0) term.scrollLines(-whole)
+        return
+      }
+      notchDebt += lines / LINES_PER_NOTCH
+      const notches = Math.trunc(notchDebt)
+      if (notches === 0) return
+      notchDebt -= notches
+      const rect = el.getBoundingClientRect()
+      const fx = x === undefined ? 0.5 : (x - rect.left) / rect.width
+      const fy = y === undefined ? 0.5 : (y - rect.top) / rect.height
+      const col = Math.min(term.cols, Math.max(1, Math.ceil(fx * term.cols)))
+      const row = Math.min(term.rows, Math.max(1, Math.ceil(fy * term.rows)))
+      // SGR mouse report: button 64 = wheel up, 65 = wheel down
+      const report = `\x1b[<${notches > 0 ? 64 : 65};${col};${row}M`
+      writeRef.current(report.repeat(Math.min(Math.abs(notches), 60)))
+    }
+    scrollRef.current = scrollBy
+
+    /*
+     * Finger tracking, then a glide after the finger lifts — as a native list
+     * scrolls. A slow drag moves the text with the finger; the faster the
+     * flick, the further each pixel of glide carries, so a long history is a
+     * few flicks away rather than hundreds of drags.
+     */
+    let lastX = 0
+    let lastY: number | null = null
+    let lastT = 0
+    let velocity = 0 // px per ms, smoothed
+    let moved = false
+    let glide: number | null = null
+    const stopGlide = (): void => {
+      if (glide !== null) cancelAnimationFrame(glide)
+      glide = null
+    }
+    /*
+     * Touch events keep going to the element the finger landed on, and stop
+     * reaching its ancestors if it is removed from the page — which is what
+     * happens when the screen redraws mid-swipe and xterm replaces the row
+     * under the finger. So the rest of the gesture is also listened for on
+     * that element itself; `seen` keeps an event from being handled twice
+     * while the element is still in place.
+     */
+    const seen = new WeakSet<Event>()
+    let grip: EventTarget | null = null
+    const release = (): void => {
+      grip?.removeEventListener('touchmove', onTouchMove as EventListener)
+      grip?.removeEventListener('touchend', onTouchEnd as EventListener)
+      grip?.removeEventListener('touchcancel', onTouchEnd as EventListener)
+      grip = null
+    }
     const onTouchStart = (e: TouchEvent): void => {
-      lastY = e.touches.length === 1 ? e.touches[0].clientY : null
-      carry = 0
+      release()
+      grip = e.target
+      grip?.addEventListener('touchmove', onTouchMove as EventListener, { passive: false })
+      grip?.addEventListener('touchend', onTouchEnd as EventListener, { passive: true })
+      grip?.addEventListener('touchcancel', onTouchEnd as EventListener, { passive: true })
+      stopGlide()
+      notchDebt = 0
+      velocity = 0
       moved = false
+      if (e.touches.length !== 1) {
+        lastY = null
+        return
+      }
+      lastX = e.touches[0].clientX
+      lastY = e.touches[0].clientY
+      lastT = e.timeStamp
     }
     const onTouchMove = (e: TouchEvent): void => {
+      if (seen.has(e)) return
+      seen.add(e)
       if (lastY === null || e.touches.length !== 1) return
       const y = e.touches[0].clientY
-      carry += y - lastY
-      lastY = y
-      const tracking = term.modes.mouseTrackingMode !== 'none'
-      const step = cellHeight() * (tracking ? LINES_PER_NOTCH : 1)
-      const lines = Math.trunc(carry / step)
-      if (lines === 0) {
-        if (moved) e.preventDefault()
-        return
-      }
+      const dy = y - lastY
+      const dt = Math.max(e.timeStamp - lastT, 1)
+      // a few px of slop so a tap is not a scroll
+      if (!moved && Math.abs(dy) < 6) return
       moved = true
-      carry -= lines * step
+      lastX = e.touches[0].clientX
+      lastY = y
+      lastT = e.timeStamp
+      velocity = 0.7 * velocity + 0.3 * (dy / dt)
       e.preventDefault()
       e.stopPropagation()
-      if (!tracking) {
-        term.scrollLines(-lines)
-        return
+      // speed up with the finger: 1x when reading, up to 4x when swiping hard
+      const gain = 1 + Math.min(Math.abs(velocity) * 1.5, 3)
+      scrollBy((dy / cellHeight()) * gain, lastX, y)
+    }
+    const onTouchEnd = (e: TouchEvent): void => {
+      if (seen.has(e)) return
+      seen.add(e)
+      if (e.touches.length === 0) release()
+      if (lastY === null || e.touches.length > 0) return
+      const endY = lastY
+      lastY = null
+      // a finger that rested before lifting is not a flick
+      if (!moved || e.timeStamp - lastT > 80 || Math.abs(velocity) < 0.25) return
+      let v = velocity
+      const gain = 1 + Math.min(Math.abs(v) * 4, 14)
+      let prev = performance.now()
+      const step = (now: number): void => {
+        const dt = Math.min(now - prev, 50)
+        prev = now
+        scrollBy(((v * dt) / cellHeight()) * gain, lastX, endY)
+        v *= Math.pow(0.997, dt)
+        glide = Math.abs(v) > 0.03 ? requestAnimationFrame(step) : null
       }
-      const rect = el.getBoundingClientRect()
-      const col = Math.min(term.cols, Math.max(1, Math.ceil(((e.touches[0].clientX - rect.left) / rect.width) * term.cols)))
-      const row = Math.min(term.rows, Math.max(1, Math.ceil(((y - rect.top) / rect.height) * term.rows)))
-      // SGR mouse report: button 64 = wheel up, 65 = wheel down
-      const report = `\x1b[<${lines > 0 ? 64 : 65};${col};${row}M`
-      writeRef.current(report.repeat(Math.min(Math.abs(lines), 20)))
+      glide = requestAnimationFrame(step)
     }
     el.addEventListener('touchstart', onTouchStart, { capture: true, passive: true })
     el.addEventListener('touchmove', onTouchMove, { capture: true, passive: false })
-    // a tap brings up the keyboard
-    const onClick = (): void => term.focus()
+    el.addEventListener('touchend', onTouchEnd, { capture: true, passive: true })
+    el.addEventListener('touchcancel', onTouchEnd, { capture: true, passive: true })
+    // in direct mode a tap brings up the keyboard
+    const onClick = (): void => {
+      if (directRef.current) term.focus()
+    }
     el.addEventListener('click', onClick)
 
     return () => {
@@ -241,6 +358,10 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function Term
       if (timer !== null) window.clearTimeout(timer)
       el.removeEventListener('touchstart', onTouchStart, { capture: true })
       el.removeEventListener('touchmove', onTouchMove, { capture: true })
+      el.removeEventListener('touchend', onTouchEnd, { capture: true })
+      el.removeEventListener('touchcancel', onTouchEnd, { capture: true })
+      release()
+      stopGlide()
       el.removeEventListener('click', onClick)
       dataSub.dispose()
       term.dispose()
@@ -257,6 +378,17 @@ const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function Term
     term.options.fontSize = fontSize
     fitRefFn.current()
   }, [fontSize])
+
+  /*
+   * With the compose box in charge, xterm's hidden input must not raise the
+   * keyboard when the terminal is touched (xterm focuses it on every tap).
+   */
+  useEffect(() => {
+    const input = termRef.current?.textarea
+    if (!input) return
+    input.inputMode = direct ? 'text' : 'none'
+    if (!direct && document.activeElement === input) input.blur()
+  }, [direct])
 
   // a hidden terminal has no box to fit; catch up when it is shown again
   useEffect(() => {

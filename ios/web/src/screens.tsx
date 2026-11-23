@@ -658,6 +658,8 @@ export function SessionScreen({
   const [filesOpened, setFilesOpened] = useState(false)
   const [unsaved, setUnsaved] = useState(false)
   const [ctrl, setCtrl] = useState(false)
+  // false: type in the compose box; true: the keyboard types into the terminal
+  const [direct, setDirect] = useState(false)
   const [menu, setMenu] = useState(false)
   const [copyText, setCopyText] = useState<string | null>(null)
   const agentRef = useRef<TerminalHandle | null>(null)
@@ -766,6 +768,7 @@ export function SessionScreen({
           cwd={session.cwd}
           fontSize={fontSize}
           visible={tab === 'agent'}
+          direct={direct}
           onCtrlUsed={() => armCtrl(false)}
         />
         {shellOpened && (
@@ -776,6 +779,7 @@ export function SessionScreen({
             cwd={session.cwd}
             fontSize={fontSize}
             visible={tab === 'shell'}
+            direct={direct}
             onCtrlUsed={() => armCtrl(false)}
           />
         )}
@@ -785,8 +789,22 @@ export function SessionScreen({
         )}
       </div>
 
+      {tab !== 'files' && !direct && <ComposeBox onSend={(text) => active()?.submit(text)} />}
       {tab !== 'files' && (
         <div className='keybar'>
+          <KeyButton
+            label={direct ? 'compose' : 'keys'}
+            title='Switch between the compose box and typing straight into the terminal'
+            wide
+            active={direct}
+            onPress={() => {
+              const next = !direct
+              setDirect(next)
+              if (next) window.setTimeout(() => active()?.focus(), 0)
+            }}
+          />
+          <KeyButton label='pg↑' title='Scroll back one screen' onPress={() => active()?.page(-1)} />
+          <KeyButton label='pg↓' title='Scroll forward one screen' onPress={() => active()?.page(1)} />
           <KeyButton label='esc' onPress={() => active()?.send('\x1b')} />
           <KeyButton label='tab' onPress={() => active()?.send('\t')} />
           <KeyButton label='⇧tab' title='Shift+Tab' onPress={() => active()?.send('\x1b[Z')} />
@@ -802,7 +820,14 @@ export function SessionScreen({
           <KeyButton label='~' onPress={() => active()?.send('~')} />
           <KeyButton label='-' onPress={() => active()?.send('-')} />
           <KeyButton label='paste' wide onPress={() => active()?.paste()} />
-          <KeyButton label='hide ⌨' wide onPress={() => active()?.blur()} />
+          <KeyButton
+            label='hide ⌨'
+            wide
+            onPress={() => {
+              active()?.blur()
+              if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+            }}
+          />
         </div>
       )}
 
@@ -844,6 +869,62 @@ export function SessionScreen({
           </div>
         </Sheet>
       )}
+    </div>
+  )
+}
+
+/**
+ * Where a message is written before it goes to the terminal. It is an ordinary
+ * text field, so everything the iOS keyboard does works in it: dictation,
+ * autocorrect, swipe typing, moving the cursor, paste. Typing straight into a
+ * terminal sends every keystroke to the server as it happens, which is slow
+ * and which dictation — it keeps rewriting what it has heard — turns into
+ * repeated text.
+ *
+ * The field is deliberately not controlled by React: writing its value back
+ * during dictation would interrupt it.
+ */
+function ComposeBox({ onSend }: { onSend: (text: string) => void }): React.JSX.Element {
+  const areaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [empty, setEmpty] = useState(true)
+  const sendRef = useRef(onSend)
+  sendRef.current = onSend
+
+  const resize = (): void => {
+    const area = areaRef.current
+    if (!area) return
+    area.style.height = 'auto'
+    area.style.height = `${Math.min(area.scrollHeight, 132)}px`
+    setEmpty(area.value === '')
+  }
+
+  const send = (): void => {
+    const area = areaRef.current
+    if (!area) return
+    const text = area.value
+    area.value = ''
+    resize()
+    sendRef.current(text)
+  }
+
+  return (
+    <div className='compose'>
+      <textarea
+        ref={areaRef}
+        className='compose-input'
+        rows={1}
+        placeholder='Message — type or dictate, then send'
+        enterKeyHint='send'
+        autoCapitalize='sentences'
+        onInput={resize}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault()
+            send()
+          }
+        }}
+      />
+      <KeyButton label={empty ? '⏎' : 'Send'} title='Send to the terminal' className='compose-send' onPress={send} />
     </div>
   )
 }

@@ -17,6 +17,15 @@ What it does:
   bar supplies what the iOS keyboard lacks (esc, tab, shift-tab, a sticky ctrl, ^C, arrows),
   dragging scrolls tmux history, and "Select & copy text" turns the pane into selectable
   text. Copies made on the server (OSC 52) land on the phone's clipboard.
+- **Compose box** — under the terminal is an ordinary text field. Type or dictate
+  into it, then press return or **Send**: the text is pasted into the terminal in one
+  piece, followed by Enter. Dictation, autocorrect and swipe typing all work there,
+  and nothing is sent while you are still writing. With the box empty, Send is just
+  Enter. The key bar (esc, arrows, ^C…) always goes straight to the terminal. The
+  **keys** button switches to typing directly into the terminal, for programs that
+  want single keystrokes; dictation is unreliable in that mode.
+- **Scrolling** — drag to scroll, flick to glide (the harder the flick, the further),
+  touch to stop. **pg↑ / pg↓** in the key bar move one screen.
 - **Files** — browse the session's directory, read text files, and edit them: tap a
   file, then **Edit**, then **Save**. A save replaces the file atomically and keeps
   its permissions, line endings and encoding. If the file changed on the server

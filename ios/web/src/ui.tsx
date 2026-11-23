@@ -101,13 +101,15 @@ export function KeyButton({
   onPress,
   active,
   wide,
-  title
+  title,
+  className
 }: {
   label: string
   onPress: () => void
   active?: boolean
   wide?: boolean
   title?: string
+  className?: string
 }): React.JSX.Element {
   const ref = useRef<HTMLButtonElement | null>(null)
   const pressRef = useRef(onPress)
@@ -153,7 +155,7 @@ export function KeyButton({
       type='button'
       tabIndex={-1}
       title={title}
-      className={`key${active ? ' active' : ''}${wide ? ' wide' : ''}`}
+      className={`key${active ? ' active' : ''}${wide ? ' wide' : ''}${className ? ' ' + className : ''}`}
     >
       {label}
     </button>
